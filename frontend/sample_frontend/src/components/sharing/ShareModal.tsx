@@ -21,7 +21,7 @@ export function ShareModal({ clip, onClose }: Props) {
   const [copied, setCopied] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const link = `${window.location.origin}/clip/${clip.id}`;
+  const link = clip.hls_playlist_url ? clip.hls_playlist_url : `${window.location.origin}/public/clips/${clip.id}`;
 
   const onUsernameChange = (val: string) => {
     setUsername(val);

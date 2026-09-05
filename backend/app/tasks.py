@@ -177,6 +177,22 @@ def _process_audio_to_hls_impl(self, clip_id, timer):
     # Now 'clip' is guaranteed to exist for the following logic
     logger.info("process_audio_to_hls Task is starting...")
     clip = AudioClip.objects.get(id=clip_id)
+
+    # ISSUE-04: Block HLS generation if moderation has not passed.
+    # DECISION: Option A (v1): moderation_approved boolean. The task
+    # skips processing and logs a warning if False. The approve-moderation
+    # endpoint must set it to True before HLS can run.
+    # HACK: We don't fail the task (terminal_error) because moderation
+    # is an operational gate, not a file error. A future version may
+    # retry after approval; for v1 we just skip.
+    if not clip.moderation_approved:
+        logger.info("process_audio_to_hls: moderation not approved for clip %s; skipping HLS generation.", clip_id)
+        timer.set_outcome('skipped')
+        # Don't change status — leave as 'processing' so the operator
+        # knows it hasn't been processed yet. The approve endpoint
+        # will trigger processing separately.
+        return
+
     if not clip.original_file:
         # Handle missing file error
         logger.error("Audio file for clip %s not found.", clip_id)
@@ -278,6 +294,31 @@ def _process_audio_to_hls_impl(self, clip_id, timer):
                 # Fallback for purely instrumental tracks with no vocals
                 clip.semantic_vector = [0.0] * 384
                 clip.tags = ["instrumental"]
+
+            # ISSUE-04: Run moderation checks on transcript (if exists) and tags.
+            # For v1, we compare transcript_text and tags against blocked phrases.
+            # If moderation fails, mark as rejected and stop HLS processing.
+            from ..services import content_moderation as moderation_svc
+            # The transcript_text variable is available in this scope.
+            transcript_approved, transcript_reason = moderation_svc.check_transcript_for_prohibited_content(transcript_text if 'transcript_text' in locals() else None)
+            tags_approved, tags_reason = moderation_svc.check_tags_for_prohibited_content(clip.tags)
+            if not transcript_approved:
+                logger.error("Moderation rejected clip %s (transcript): %s", clip_id, transcript_reason)
+                clip.moderation_approved = False
+                clip.status = 'rejected'
+                clip.save(update_fields=['moderation_approved', 'status', 'tags'])
+                timer.set_outcome('moderation_rejected')
+                return
+            if not tags_approved:
+                logger.error("Moderation rejected clip %s (tags): %s", clip_id, tags_reason)
+                clip.moderation_approved = False
+                clip.status = 'rejected'
+                clip.save(update_fields=['moderation_approved', 'status', 'tags'])
+                timer.set_outcome('moderation_rejected')
+                return
+
+            # All moderation checks passed — set approved.
+            clip.moderation_approved = True
         except (OSError, ConnectionError):
             logger.exception("AI inference transient error for clip %s; re-raising for retry", clip_id)
             raise

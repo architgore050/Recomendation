@@ -10,103 +10,69 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # DECISION: env hoisted to job level — per-step env blocks had drifted
-    # (the collectstatic step used to omit env vars that some steps required
-    # at import time) and would drift again. Every step now inherits the
-    # same config.
     env:
-      DATABASE_URL: postgresql://echoflow:testpassword@localhost:5432/echoflow_test
-      REDIS_URL: redis://localhost:6379/1
-      DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
-      DJANGO_DEBUG: 'True'
-      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.11']
-
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_DB: echoflow_test
-          POSTGRES_USER: echoflow
-          POSTGRES_PASSWORD: testpassword
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+      DB_USER: echoflow
+      DB_PASSWORD: testpassword
+      DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY || 'test-secret-key-not-for-prod' }}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_STORAGE_BUCKET_NAME: test-bucket
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Group C item 21: Defensive check that no tracked env file
-      # has DJANGO_DEBUG=True. .env is gitignored; this protects
-      # against future boilerplate files being committed with DEBUG on.
       - name: Check no tracked env file has DJANGO_DEBUG=True
         run: bash scripts/check_no_tracked_env.sh
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@v1
 
-      - name: Install system dependencies
+      - name: Build and start test stack
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libpq-dev \
-            gcc \
-            ffmpeg \
-            libsndfile1
+          docker compose -f docker-compose.yml -f docker-compose.test.yml build
+          docker compose -f docker-compose.yml -f docker-compose.test.yml up --no-start db redis_broker redis_cache minio minio-init
+          docker compose -f docker-compose.yml -f docker-compose.test.yml start db redis_broker redis_cache minio
 
-      - name: Install Python dependencies
+      - name: Wait for DB readiness
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose.yml -f docker-compose.test.yml exec -T db pg_isready -U echoflow; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "DB not ready after 60s"
+          exit 1
 
-      # DECISION: `migrate --check` exits 1 whenever ANY migration is unapplied and never
-      # applies them — on a fresh CI database that is always true, so it could never pass.
-      # We apply migrations instead, then use `makemigrations --check --dry-run` to catch
-      # model changes that are missing migration files.
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose.yml -f docker-compose.test.yml exec -T minio mc ready local; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MinIO not ready after 60s"
+          exit 1
+
       - name: Run migrations
         run: |
-          python manage.py migrate --noinput
-          python manage.py makemigrations --check --dry-run
+          docker compose -f docker-compose.yml -f docker-compose.test.yml exec -T web python manage.py migrate --noinput
 
       - name: Run Django system checks
         run: |
-          python manage.py check --fail-level WARNING
+          docker compose -f docker-compose.yml -f docker-compose.test.yml exec -T web python manage.py check --fail-level WARNING
 
       - name: Run tests
         run: |
-          python manage.py test backend.app --verbosity 2
+          docker compose -f docker-compose.yml -f docker-compose.test.yml exec -T web pytest backend/app/tests/ --tb=short -v
 
-      # Integration test suite (pgvector HNSW, real Postgres row-level locks,
-      # real Redis Streams, S3 semantics). The `postgres` + `redis` services
-      # above provide the infrastructure; these tests are auto-skipped on
-      # SQLite + LocMem via `conftest.py::_skip_integration_without_real_services`.
-      - name: Run integration tests (Postgres + Redis)
-        run: |
-          pytest backend/app/tests/ -m integration --tb=short
-
-      # DECISION: collectstatic has no --check flag (that's migrate). --dry-run alone
-      # exercises finders + WhiteNoise storage config without writing files.
       - name: Check static files
         run: |
-          python manage.py collectstatic --noinput --dry-run
+          docker compose -f docker-compose.yml -f docker-compose.test.yml exec -T web python manage.py collectstatic --noinput --dry-run
+
+      - name: Tear down test stack
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml down -v

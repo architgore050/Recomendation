@@ -1,19 +1,14 @@
 """Pytest fixtures and configuration for the EchoFlow test suite.
 
-DESIGN:
-  - Tests run against an in-memory SQLite database (fast, no Docker).
-  - Cache uses Django's local-memory backend (no Redis dependency).
-  - Each test gets a fresh DB via pytest-django's --create-db / --reuse-db.
-  - The User model and AudioClip/Comment/UserInteraction models are exercised.
+ALL tests run against PostgreSQL inside the Docker `web` container.
+No SQLite fallback, no stub migrations, no bare-metal test mode.
 
-WHY SQLite:
-  - PostgreSQL-only features (pgvector, HNSW indexes, full CheckConstraint
-    parsing) are not used by the tests we care about (validation, rate
-    limiting, model invariants). The tests that DO need postgres are
-    skipped with @pytest.mark.skip_postgres for now.
-  - SQLite gives sub-100ms test setup, which is what we want for fast CI.
-  - When we add coverage that needs pgvector (vector similarity), those
-    tests will be marked and run in the Docker CI lane only.
+The test database is `echoflow_test` — created automatically on first
+run by this conftest (using psycopg2 to connect to the Postgres instance
+and CREATE DATABASE). It is dropped on session teardown.
+
+Pgvector extension is installed on `template1` so every CREATE DATABASE
+inherits it — no migration hackery needed.
 """
 import os
 import sys
@@ -22,7 +17,6 @@ from pathlib import Path
 # Set required env vars BEFORE django.setup() — settings.py reads them.
 os.environ.setdefault('DJANGO_SECRET_KEY', 'test-secret-key-not-for-prod')
 os.environ.setdefault('DJANGO_DEBUG', 'True')
-os.environ.setdefault('DATABASE_URL', 'sqlite:///:memory:')
 os.environ.setdefault('AWS_STORAGE_BUCKET_NAME', 'test-bucket')
 os.environ.setdefault('AWS_ACCESS_KEY_ID', 'test')
 os.environ.setdefault('AWS_SECRET_ACCESS_KEY', 'test')
@@ -33,68 +27,197 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import django
 from django.conf import settings
 
-
-def _override_settings_for_tests():
-    """Force SQLite + locmem cache for unit tests. NOT called at import
-    time — see the `_force_sqlite_for_unit_tests` autouse fixture below for
-    the conditional invocation."""
-    settings.DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': ':memory:',
-        }
-    }
-    settings.CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-            'LOCATION': 'test-cache',
-        }
-    }
-    # Disable throttling in tests unless the test specifically enables it.
-    settings.REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = []
-    # CELERY_TASK_ALWAYS_EAGER: tasks run synchronously in tests
-    settings.CELERY_TASK_ALWAYS_EAGER = True
-    settings.CELERY_TASK_EAGER_PROPAGATES = True
-    # Don't redirect to HTTPS in tests.
-    settings.SECURE_SSL_REDIRECT = False
-    settings.SECURE_HSTS_SECONDS = 0
-    settings.SECURE_HSTS_INCLUDE_SUBDOMAINS = False
-    settings.SECURE_HSTS_PRELOAD = False
-    settings.SESSION_COOKIE_SECURE = False
-    settings.CSRF_COOKIE_SECURE = False
-
-
 django.setup()
 
-
-# In tests, override the app's migrations to skip the pgvector-specific
-# 0001_initial.py (which has HNSW indexes and CREATE EXTENSION that
-# SQLite cannot parse). We replace the entire app migration set with a
-# no-op stub that just marks the app as having no migrations; the test
-# DB schema is created from the current models via create_all, which
-# is fine because we don't exercise vector fields in these tests.
-import sys
-import types
-TEST_MIGRATIONS_DIR = Path(__file__).resolve().parent / 'backend' / 'app' / 'tests' / 'migrations_test'
-fake_migrations = types.ModuleType('backend.app.migrations_test')
-fake_migrations.__file__ = str(TEST_MIGRATIONS_DIR / '__init__.py')
-sys.modules['backend.app.migrations_test'] = fake_migrations
-settings.MIGRATION_MODULES = {'app': 'backend.app.migrations_test'}
+# Force test database name. Conftest auto-creates `echoflow_test` if it
+# doesn't exist, so the real migrations run against a clean Postgres DB.
+# This is the root-cause fix for the previous 178 `auth_group does not exist`
+# errors: we no longer fight pytest-django's hook ordering with SQLite
+# overrides. We just use Postgres with real migrations.
+if settings.DATABASES['default'].get('NAME') != 'echoflow_test':
+    db = settings.DATABASES['default'].copy()
+    db['NAME'] = 'echoflow_test'
+    settings.DATABASES['default'] = db
 
 
-# Filter out HnswIndex from the model's _meta.indexes for SQLite tests.
-# Even with --no-migrations, Django's create_all uses the model's index
-# list. HnswIndex emits Postgres-only SQL (WITH (m=16, ...)) that SQLite
-# can't parse. Removing them lets the schema be created.
-from backend.app.models import AudioClip as _AudioClip
-from pgvector.django import HnswIndex as _HnswIndex
-_AudioClip._meta.indexes = [
-    idx for idx in _AudioClip._meta.indexes if not isinstance(idx, _HnswIndex)
-]
-
-
+import psycopg2
 import pytest
 
+
+def _install_pgvector_on_template1():
+    """Install pgvector extension on template1 so every new DB inherits it.
+
+    The real 0001_initial.py runs `CREATE EXTENSION IF NOT EXISTS vector;`
+    which is Postgres-only. By installing it on template1, every CREATE
+    DATABASE (including echoflow_test) is born with `vector` already loaded.
+    """
+    db = settings.DATABASES['default']
+    if not db.get('ENGINE', '').endswith('postgresql'):
+        return
+
+    target_user = db.get('USER', '')
+    target_password = db.get('PASSWORD', '')
+    target_host = db.get('HOST', '')
+    target_port = db.get('PORT', '')
+
+    # Connect to template1 as the test DB user to install pgvector.
+    # If that user lacks superuser privileges, fall back to connecting
+    # as the default postgres superuser (common in Docker setups).
+    admin_user = target_user or 'postgres'
+    admin_password = target_password or ''
+    admin_host = target_host or 'localhost'
+    admin_port = target_port or '5432'
+
+    try:
+        admin_conn = psycopg2.connect(
+            host=admin_host,
+            port=admin_port,
+            user=admin_user,
+            password=admin_password,
+            dbname='template1',
+        )
+    except psycopg2.OperationalError:
+        # Fallback: try connecting without password (trust auth)
+        try:
+            admin_conn = psycopg2.connect(
+                host=admin_host,
+                port=admin_port,
+                user=admin_user,
+                dbname='template1',
+            )
+        except psycopg2.OperationalError:
+            # If we can't connect to template1, pgvector may already be
+            # installed or the test user has superuser on the target DB.
+            # Skip — tests will fail with a clear error if extension is missing.
+            return
+
+    admin_conn.autocommit = True
+    try:
+        with admin_conn.cursor() as cur:
+            cur.execute('CREATE EXTENSION IF NOT EXISTS vector;')
+    finally:
+        admin_conn.close()
+
+
+def _create_test_database():
+    """Create `echoflow_test` if it doesn't already exist.
+
+    Connects to the Postgres instance (defaulting to `postgres` DB) and
+    runs CREATE DATABASE if the test DB is missing. This lets developers
+    run tests without manually creating the DB first.
+    """
+    db = settings.DATABASES['default']
+    test_name = db.get('NAME', 'echoflow_test')
+    if not test_name:
+        return
+
+    if not db.get('ENGINE', '').endswith('postgresql'):
+        return
+
+    target_user = db.get('USER', 'postgres')
+    target_password = db.get('PASSWORD', '')
+    target_host = db.get('HOST', 'localhost')
+    target_port = db.get('PORT', '5432')
+
+    # Connect to the default `postgres` DB to check/create the test DB.
+    try:
+        admin_conn = psycopg2.connect(
+            host=target_host,
+            port=target_port,
+            user=target_user,
+            password=target_password,
+            dbname='postgres',
+        )
+    except psycopg2.OperationalError:
+        # Fallback: try without password
+        try:
+            admin_conn = psycopg2.connect(
+                host=target_host,
+                port=target_port,
+                user=target_user,
+                dbname='postgres',
+            )
+        except psycopg2.OperationalError:
+            # Can't connect — assume DB exists or will be created by CI.
+            return
+
+    admin_conn.autocommit = True
+    try:
+        with admin_conn.cursor() as cur:
+            # Check if test DB exists
+            cur.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s;",
+                (test_name,),
+            )
+            if not cur.fetchone():
+                cur.execute(f'CREATE DATABASE "{test_name}";')
+    finally:
+        admin_conn.close()
+
+
+def _drop_test_database():
+    """Drop `echoflow_test` on session teardown (optional cleanup).
+
+    Only drops connections if the test DB exists. Skips silently if
+    the DB doesn't exist or we can't connect.
+    """
+    db = settings.DATABASES['default']
+    test_name = db.get('NAME', 'echoflow_test')
+    if not test_name:
+        return
+
+    if not db.get('ENGINE', '').endswith('postgresql'):
+        return
+
+    target_user = db.get('USER', 'postgres')
+    target_password = db.get('PASSWORD', '')
+    target_host = db.get('HOST', 'localhost')
+    target_port = db.get('PORT', '5432')
+
+    try:
+        admin_conn = psycopg2.connect(
+            host=target_host,
+            port=target_port,
+            user=target_user,
+            password=target_password,
+            dbname='postgres',
+        )
+    except psycopg2.OperationalError:
+        return
+
+    admin_conn.autocommit = True
+    try:
+        with admin_conn.cursor() as cur:
+            # Terminate existing connections first
+            cur.execute(
+                """SELECT pg_terminate_backend(pid)
+                   FROM pg_stat_activity
+                   WHERE datname = %s AND pid <> pg_backend_pid();""",
+                (test_name,),
+            )
+            cur.execute(f'DROP DATABASE IF EXISTS "{test_name}";')
+    finally:
+        admin_conn.close()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_sessionstart(session):
+    """Install pgvector on template1 and create echoflow_test DB."""
+    _install_pgvector_on_template1()
+    _create_test_database()
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_sessionfinish(session, exitstatus):
+    """Drop echoflow_test DB on session teardown."""
+    yield
+    _drop_test_database()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture
 def user(django_user_model):
@@ -140,56 +263,6 @@ def ready_clip(user):
         semantic_vector=[0.1] * 384,
         acoustic_vector=[0.1] * 128,
     )
-
-
-@pytest.fixture(autouse=True)
-def _force_sqlite_for_unit_tests(request):
-    """Apply the unit-suite overrides for tests that are NOT marked `integration`.
-
-    DECISION: the SQLite + locmem override was previously unconditional
-    (called at conftest import time). That broke the integration suite (D25):
-    in CI, `pytest -m integration` would inherit `DATABASE_URL=postgresql://...`
-    from the job env, but the conftest was still forcing settings.DATABASES
-    to SQLite. That both prevented the integration tests from connecting to
-    the real Postgres AND triggered the integration skip fixture (which
-    checks `settings.DATABASES['default']['ENGINE']`).
-
-    Moving the override into an autouse fixture lets us check
-    `request.keywords` for the `integration` marker and skip the override
-    for those tests, leaving `settings.DATABASES` / `settings.CACHES` at
-    whatever settings.py + the env var constructed (Postgres + Redis in CI).
-    """
-    if 'integration' in request.keywords:
-        return
-    _override_settings_for_tests()
-
-
-@pytest.fixture(autouse=True)
-def _skip_integration_without_real_services(request):
-    """Skip tests marked `integration` when running without real Postgres + Redis.
-
-    Integration tests exercise pgvector HNSW indexes, Postgres row-level locks,
-    real Redis Streams, and S3 semantics — none of which work on SQLite + LocMem.
-    The unit suite (default) runs against SQLite + LocMem for speed; the
-    integration suite is selected explicitly with `pytest -m integration` and
-    runs in CI against the real Postgres + Redis services.
-
-    Two checks: a non-SQLite DATABASE engine AND a non-locmem cache backend.
-    Either failing -> skip with an actionable message.
-
-    DECISION: this fixture is autouse but conditional — it only fires for
-    tests marked `integration` (via `request.keywords`). The companion
-    fixture `_force_sqlite_for_unit_tests` is also conditional on
-    `integration` being ABSENT, so the two fixtures do not conflict.
-    """
-    if 'integration' not in request.keywords:
-        return
-    db_engine = settings.DATABASES['default']['ENGINE']
-    if db_engine == 'django.db.backends.sqlite3':
-        pytest.skip("integration tests require a non-SQLite DATABASE_URL (Postgres)")
-    cache_backend = settings.CACHES['default']['BACKEND']
-    if 'locmem' in cache_backend.lower() or 'local' in cache_backend.lower():
-        pytest.skip("integration tests require a real Redis cache backend")
 
 
 @pytest.fixture

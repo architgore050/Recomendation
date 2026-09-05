@@ -1,0 +1,125 @@
+# docker-compose.test.yml — Minimal test stack for pytest.
+#
+# Services: db, redis_broker, redis_cache, minio, minio-init, web
+# Excluded: pgbouncer (tests connect directly to db), celery workers
+#           (tests use CELERY_TASK_ALWAYS_EAGER), nginx (tests use
+#           DRF APIClient), prometheus/grafana (not needed for tests).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d
+#   docker compose exec web pytest backend/app/tests/ --tb=short -v
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml down
+
+services:
+
+  # Test database — pgvector/pg16, no pgbouncer layer.
+  # Tests connect directly to this container.
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: echoflow_test_db
+    restart: "no"
+    environment:
+      POSTGRES_DB: echoflow_test
+      POSTGRES_USER: ${DB_USER:-echoflow}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-testpassword}
+    volumes:
+      - test_postgres_data:/var/lib/postgresql/data
+
+  # Test Redis broker — noeviction, 512MB.
+  redis_broker:
+    image: redis:7-alpine
+    container_name: echoflow_test_redis_broker
+    restart: "no"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    volumes:
+      - test_redis_broker_data:/data
+
+  # Test Redis cache — allkeys-lru, 1GB.
+  redis_cache:
+    image: redis:7-alpine
+    container_name: echoflow_test_redis_cache
+    restart: "no"
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - test_redis_cache_data:/data
+
+  # Test MinIO — S3-compatible object storage.
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: echoflow_test_minio
+    restart: "no"
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-test}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-test}
+      MINIO_CORS_ALLOW_ORIGIN: "*"
+      MINIO_CORS_ALLOW_METHODS: "GET,PUT,POST,DELETE,OPTIONS"
+      MINIO_CORS_ALLOW_HEADERS: "Origin,Accept,Content-Type,Authorization,Range"
+      MINIO_CORS_EXPOSE_HEADERS: "Date,Content-Length,Content-Range,Accept-Ranges"
+      MINIO_CORS_MAX_AGE: "3600"
+    volumes:
+      - test_minio_data:/data
+
+  # One-shot: creates the bucket on startup.
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        mc alias set local http://minio:9000 ${AWS_ACCESS_KEY_ID:-test} ${AWS_SECRET_ACCESS_KEY:-test} &&
+        mc mb --ignore-existing local/${AWS_STORAGE_BUCKET_NAME:-test-bucket} &&
+        mc anonymous set download local/${AWS_STORAGE_BUCKET_NAME:-test-bucket}/hls
+      "
+
+  # Test runner — Django web container with tests.
+  # Uses the same image as production but runs pytest instead of gunicorn.
+  web:
+    image: devansh1012007/echoflow-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: echoflow_test_web
+    working_dir: /app
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-echoflow}:${DB_PASSWORD:-testpassword}@db:5432/echoflow_test
+      - REDIS_URL=redis://redis_broker:6379/1
+      - REDIS_BROKER_URL=redis://redis_broker:6379/0
+      - REDIS_CACHE_URL=redis://redis_cache:6379/0
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-test-secret-key-not-for-prod}
+      - DJANGO_DEBUG=True
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-test-bucket}
+      - AWS_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_S3_REGION_NAME=auto
+      - PUBLIC_MEDIA_ENDPOINT_URL=http://localhost:9000
+      - CELERY_TASK_ALWAYS_EAGER=True
+      - CELERY_TASK_EAGER_PROPAGATES=True
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+      redis_cache:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    # Override the default command to run pytest instead of gunicorn.
+    command: >
+      sh -c "set -e && python wait_for_db.py &&
+             python manage.py migrate --noinput &&
+             pytest backend/app/tests/ --tb=short -v"
+
+volumes:
+  test_postgres_data:
+  test_redis_broker_data:
+  test_redis_cache_data:
+  test_minio_data:

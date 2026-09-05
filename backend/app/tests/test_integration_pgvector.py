@@ -1,7 +1,7 @@
 """Integration tests for pgvector + HNSW index behavior.
 
-These tests REQUIRE a real Postgres+pgvector backend (the `integration`
-marker is auto-skipped on SQLite via `conftest.py::_skip_integration_without_real_services`).
+These tests REQUIRE a real Postgres+pgvector backend. They run against
+the `echoflow_test` database in Docker.
 
 What they cover:
 - The HNSW indexes declared on `AudioClip.semantic_vector` and
@@ -18,7 +18,7 @@ docs/EXPLAIN/database/05-read-replica-design.md.
 """
 import pytest
 
-pytestmark = [pytest.mark.integration, pytest.mark.django_db]
+pytestmark = pytest.mark.django_db
 
 
 @pytest.mark.django_db(transaction=True)

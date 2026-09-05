@@ -20,6 +20,12 @@ function RequireAuth({ children }: { children: JSX.Element }) {
   return <>{children}</>;
 }
 
+function PublicClipRedirect() {
+  const { id } = useParams();
+  // ISSUE-14: Redirect to feed (public endpoint handled by backend /clips/{id}/public/)
+  return <Navigate to="/feed" replace />;
+}
+
 export function AppRouter() {
   return (
     <BrowserRouter>
@@ -35,6 +41,7 @@ export function AppRouter() {
         <Route path="/library" element={<Protected><AppShell page="library"><LibraryPage go={navTo} /></AppShell></Protected>} />
         <Route path="/upload" element={<Protected><AppShell page="upload"><UploadPage go={navTo} /></AppShell></Protected>} />
         <Route path="/settings" element={<Protected><AppShell page="settings"><SettingsPage go={navTo} /></AppShell></Protected>} />
+        <Route path="/public/clips/:id" element={<PublicClipRedirect />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <BackendWatcher />

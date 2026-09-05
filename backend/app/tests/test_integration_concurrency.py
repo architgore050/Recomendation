@@ -1,13 +1,14 @@
 """Integration tests for concurrent write behavior.
 
-These tests REQUIRE a real Postgres backend (the `integration` marker is
-auto-skipped on SQLite via `conftest.py::_skip_integration_without_real_services`).
+These tests REQUIRE a real Postgres backend with row-level locks
+(`SELECT ... FOR UPDATE`). They run against the `echoflow_test` database
+in Docker.
 
 Why SQLite is not enough: SQLite uses database-level locking for every
 write. A multi-threaded test against SQLite serializes all writes through
 a single lock — the very behavior we're trying to stress-test cannot be
-exercised. Postgres row-level locks (`SELECT ... FOR UPDATE`) are the
-actual production code path; these tests guard that path.
+exercised. Postgres row-level locks are the actual production code path;
+these tests guard that path.
 
 Companion: backend/app/services/interactions.py (Redis INCRBY counter
 store path under transaction.atomic), backend/app/models.py
@@ -20,7 +21,7 @@ import threading
 
 import pytest
 
-pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
+pytestmark = pytest.mark.django_db(transaction=True)
 
 
 class TestConcurrentWrites:
@@ -30,11 +31,9 @@ class TestConcurrentWrites:
         """N threads concurrently update AudioClip counters via the F()
         expression path. The final value must equal N (no lost updates).
 
-        With SQLite, this passes trivially because the DB serializes
-        all writes; with Postgres row-level locks + F() expressions,
-        the writes either commit atomically (correct) or one fails
-        with a lock timeout (acceptable). The test asserts the correct
-        outcome under load.
+        With Postgres row-level locks + F() expressions, the writes either
+        commit atomically (correct) or one fails with a lock timeout
+        (acceptable). The test asserts the correct outcome under load.
         """
         from backend.app.models import AudioClip
 

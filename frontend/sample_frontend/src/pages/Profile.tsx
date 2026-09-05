@@ -33,10 +33,15 @@ export function ProfilePage({ go, userId: targetId }: Props) {
     setLoading(true); setErr(null);
     const load = async () => {
       try {
-        if (demo || !targetId) {
+        if (demo) {
           const p = await fetchProfile(targetId);
           setProf(p.profile);
           setClips(p.clips);
+        } else if (isOwn) {
+          const p = await profileAPI.getMyProfile();
+          setProf(p);
+          const cd = await clipsAPI.getUserClips(au?.id || 0);
+          setClips(cd.results || []);
         } else {
           const p = await profileAPI.getProfile(Number(targetId));
           setProf(p);
@@ -104,7 +109,7 @@ export function ProfilePage({ go, userId: targetId }: Props) {
       <div style={{ padding: isOwn ? '54px 18px 18px' : '8px 18px 18px' }}>
         <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 18 }}>
           <div style={{ position: 'relative' }}>
-            <Avatar src={prof.profile_picture} name={prof.username} size={78} />
+            <Avatar src={(prof.profile_picture_url || prof.profile_picture)} name={prof.username} size={78} />
             {!isOwn && (
               <div style={{
                 position: 'absolute', bottom: 0, right: 0, width: 18, height: 18, borderRadius: '50%',

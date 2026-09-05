@@ -108,7 +108,7 @@ class FastFeedViewSet(viewsets.ViewSet):
             )
             clips = (
                 AudioClip.objects
-                .filter(id__in=clip_ids)
+                .filter(id__in=clip_ids, moderation_approved=True)
                 .annotate(user_has_liked=Exists(user_like_subquery))
                 .order_by(preserved_order)
             )
@@ -125,7 +125,7 @@ class FastFeedViewSet(viewsets.ViewSet):
             )
             fallback = (
                 AudioClip.objects
-                .filter(status='ready')
+                .filter(status='ready', moderation_approved=True)
                 .annotate(user_has_liked=Exists(
                     UserInteraction.objects.filter(
                         clip=OuterRef('pk'), user=request.user, interaction_type='like'
@@ -156,7 +156,7 @@ class SuggestionViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         category = self.request.query_params.get('category') or 'all'
 
-        queryset = AudioClip.objects.filter(status='ready', category=category)
+        queryset = AudioClip.objects.filter(status='ready', category=category, moderation_approved=True)
 
         # DECISION: Wrap the vector search in try/except. The architecture
         # audit warns that a Postgres/Redis hiccup in
@@ -233,6 +233,7 @@ class TagsViewSet(viewsets.ViewSet):
                 tag_filter,
                 semantic_vector__isnull=False,
                 acoustic_vector__isnull=False,
+                moderation_approved=True,
             ).order_by('-likes')[:100]
 
         if not baseline_clips:

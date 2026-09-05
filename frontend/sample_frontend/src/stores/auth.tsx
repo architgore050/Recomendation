@@ -52,7 +52,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const register = async (email: string, username: string, password: string) => {
     setLoading(true);
     try {
-      const d = await authAPI.register(email, username, password);
+      await authAPI.register(email, username, password);
+      // ISSUE-21: Call login after successful registration to obtain tokens.
+      const d = await authAPI.login(username, password);
       persist(d, d.user);
       sessionStorage.setItem('ef_new_user', '1');
     } finally {

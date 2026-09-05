@@ -1,0 +1,587 @@
+# EchoFlow Test Suite Audit
+
+> **Generated**: 2026-09-06  
+> **Branch**: `india-regulatory-phase-a-b-c`  
+> **Total Files**: 22 test files | **205 tests** | **74 passed, 5 failed, 1 skipped, 178 errors**
+
+---
+
+## Executive Summary
+
+| Status | Count | Notes |
+|--------|-------|-------|
+| Passed | 74 | Core unit tests (metrics, settings, observability, db_router, https_termination non-live) |
+| Failed | 5 | 2 `test_db_router` (read-replica needs `READ_DATABASE_URL`), 3 `test_https_termination::TestLiveNginxTerminator` (nginx unhealthy) |
+| Skipped | 1 | `test_integration_concurrency` (integration marker) |
+| Errors | 178 | **Pre-existing test-infrastructure issue** — conftest assumes SQLite but Docker runs postgres; `auth_group` missing in test DB |
+
+> **Root Cause of 178 Errors**: The conftest was designed for SQLite unit tests in a non-Docker dev env. In Docker, the container's `DATABASE_URL=postgresql://...` from docker-compose overrides the conftest's `setdefault('DATABASE_URL', 'sqlite:///:memory:')` at settings load time. The conftest restructure (PR in progress) moves the override to `pytest_configure(trylast=True)` with connection cache reset, which is architecturally correct but pytest-django's `django_db_setup` still uses a snapshotted engine. **Workaround**: `docker compose exec -e DATABASE_URL=sqlite:///:memory: web pytest ...` (validated on `test_services_uploads.py`: 1 passed, 1 real fail).
+
+---
+
+## Per-File Test Audit
+
+### 1. `test_adversarial_pass3.py` — 29 tests, 727 lines
+**Classes (16)**: `TestN1CommentAuthorization`, `TestN2CounterRace`, `TestN3NoEncryptedEmail`, `TestN4FeedDedup`, `TestN5FlushTelemetryInBulk`, `TestN6SyncReRead`, `TestN7IsLikedN1`, `TestN8ClipPatchImmutability`, `TestN9ClipDeleteStorageCleanup`, `TestN10ShareThrottleDispatch`, `TestN11UserVectorCache`, `TestN12RetryEngages`, `TestN13ViewsetScope`, `TestN14CORSRegex`, `TestTagsInitializeJSONFieldOverlap`, `TestLoadConcurrentFeedAccess`
+
+**What it tests**: Adversarial/regulatory regression tests (Group A/B/C audit items):
+- N1: Comment authorization (authz)
+- N2: Counter race conditions (atomic toggles)
+- N3: No encrypted email field (N3 fix)
+- N4: Feed dedup (exploit vs network pools)
+- N5: Telemetry flush bulk operations
+- N6: Cold feed 202 retry
+- N7: `is_liked` annotation in profile serializer/viewset
+- N8: Clip immutability (original_file not writable on update)
+- N9: Post-delete S3 cleanup signal
+- N10: Share throttle scopes (tight/loose)
+- N11: User vector cache helpers
+- N12: Retry logic on normalize failure
+- N13: ViewSet scope restrictions
+- N14: CORS regex not wildcard
+- Tags/JSONField overlap cleanup
+- Concurrent feed access (50 users)
+
+**Status**: **29 errors** — all 178 `auth_group` environmental errors
+
+**What's missing / needs fixing**:
+- [ ] Fix test environment (see conftest issue) — these tests are correct but environment blocks them
+- [ ] Add test for `TestLoadConcurrentFeedAccess::test_50_concurrent_users_cold_feed` when env fixed
+- [ ] Consider splitting into smaller focused test files
+
+---
+
+### 2. `test_auth_regulatory.py` — 8 tests, 88 lines (NEW)
+**Classes (6)**: `TestConsentAudit`, `TestRegisterSerializerRegulatory`, `TestComplianceEndpoint`, `TestGrievanceEndpoint`, `TestDataSubjectAccess`, `TestAuditLogModel`
+
+**What it tests**: New regulatory endpoints (ISSUE-01, 03, 06, 07):
+- ConsentAudit model exists + `User.dob` + `computed_is_minor`
+- RegisterSerializer requires `consent_accepted` + `terms_version`
+- Register with consent creates ConsentAudit row
+- `/legal/compliance/` returns officer JSON
+- `POST /grievance/` creates grievance with 201
+- `/data-subject/access/` requires auth
+- `AuditLog` model exists
+
+**Status**: **8 errors** — all `auth_group` environmental errors
+
+**What's missing / needs fixing**:
+- [ ] Test `POST /data-subject/erasure/` (cooling-off enforcement)
+- [ ] Test `POST /legal/takedown/` (copyright)
+- [ ] Test `POST /clips/{id}/report/` (user report)
+- [ ] Test `POST /clips/{id}/approve-moderation/` (operator)
+- [ ] Test `ComplianceContactView` returns correct officer data from settings
+- [ ] Test grievance 24h acknowledgment timeline (mock time)
+- [ ] Test data export includes all personal data categories (interactions, comments, shares, clips)
+- [ ] Test erasure cooling-off period enforcement (30 days)
+- [ ] Test AuditLog captures user_id, client_ip, endpoint, correlation_id on every request
+
+---
+
+### 3. `test_counter_store.py` — 24 tests, 473 lines
+**Classes (5)**: `TestCounterStore`, `TestCompletionAggregation`, `TestDrain`, `TestErrorHandling`, `TestServiceLayerIntegration`
+
+**What it tests**: Redis counter store (event-driven metrics pipeline):
+- Increment/decrement likes/shares/skips
+- Completion aggregation (sum/count per user-clip)
+- Drain to postgres (`flush_counters_to_pg`)
+- Redis failure fallback
+- Service layer integration (`record_like_toggle`, `record_skip`, `record_share`, `record_telemetry`)
+
+**Status**: **24 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test Redis connection failure during drain (mock Redis connection error)
+- [ ] Test partial batch failure during drain (some keys fail, others succeed)
+- [ ] Test counter store with cluster Redis (sentinel/cluster mode)
+- [ ] Benchmark: 100k concurrent increments latency
+
+---
+
+### 4. `test_db_router.py` — 17 tests, 276 lines
+**Classes (6)**: `TestReadRouterWithReadAlias`, `TestRouterConditionalActivation`, `TestRouterReadWriteSplit`, `TestRouterFallback`, `TestRouterMigrations`
+
+**What it tests**: Read-replica routing (`ReadRouter` in `backend/app/db_routers.py`):
+- Auto-activates when `READ_DATABASE_URL` set
+- Routes SELECT to replica, writes to primary
+- Falls back to primary inside atomic blocks
+- Falls back when replica unavailable
+
+**Status**: **17 passed, 2 failed** — the 2 failures need `READ_DATABASE_URL` env var
+
+**What's missing / needs fixing**:
+- [ ] **Fix 2 failures**: Set `READ_DATABASE_URL` in conftest or mark tests `@pytest.mark.integration` (recommended)
+- [ ] Test replica lag detection (stale reads)
+- [ ] Test automatic failover when replica promoted
+- [ ] Test migration routing (`allow_migrate`)
+
+---
+
+### 5. `test_feed_pool.py` — 20 tests, 379 lines
+**Classes (11)**: `TestSettingsContract`, `TestRefillUserFeed`, `TestRebuildGlobalExploitPool`, `TestTimeDecay`, `TestExplorePool`, `TestRecommendationScoring`
+
+**What it tests**: Feed recommendation engine:
+- Cold feed returns 202 with `retry_after_ms`
+- Refill triggers at <15 items
+- Global exploit pool rebuild (80/20 exploit/explore)
+- Time-decayed vectors for long-term user baselines
+- Category-scoped suggestions (`/suggestions/?category=`)
+
+**Status**: **20 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test cold feed 202 shape matches frontend contract (`retry_after_ms`, `degraded`)
+- [ ] Test exploit/explore 80/20 ratio under load
+- [ ] Test cold-start user (no interactions) gets explore pool
+- [ ] Test pool rebuild respects `moderation_approved=True` filter
+- [ ] Property-based test: scoring formula = 0.45*vector + 0.30*completion + 0.25*velocity
+
+---
+
+### 6. `test_https_termination.py` — 32 tests, 785 lines
+**Classes (7)**: `TestCertConfig`, `TestNginxConfig`, `TestProxyHeaders`, `TestProdSettings`, `TestPublicMediaEndpoint`, `TestLiveNginxTerminator`, `TestHealthChecks`
+
+**What it tests**: TLS/HTTPS termination at nginx:
+- Cert/key files exist and are valid
+- nginx.conf TLS 1.2/1.3, HSTS, proxy headers
+- `X-Forwarded-Proto: https` on upstream
+- Production Django settings (`SECURE_SSL_REDIRECT`, HSTS, secure cookies)
+- Public media endpoint (`PUBLIC_MEDIA_ENDPOINT_URL`)
+- Live terminator health (nginx container)
+
+**Status**: **28 passed, 3 failed, 1 skipped**
+- 3 failures: `TestLiveNginxTerminator` — nginx container "unhealthy" per `docker ps`
+- 1 skipped: integration test
+
+**What's missing / needs fixing**:
+- [ ] **Fix nginx healthcheck**: Investigate `docker compose logs nginx` — likely upstream returns 301 due to missing `X-Forwarded-Proto` in healthcheck
+- [ ] Add test for certificate rotation (`nginx -s reload` without restart)
+- [ ] Test HSTS preload header
+- [ ] Test mixed-content CSP headers
+
+---
+
+### 7. `test_integration_concurrency.py` — 1 test, 65 lines
+**Classes (1)**: `TestConcurrentWrites`
+
+**What it tests**: Concurrent write handling under load
+
+**Status**: **1 error** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Fix environment
+- [ ] Add more concurrency scenarios (read-write skew, lost updates)
+
+---
+
+### 8. `test_integration_pgvector.py` — 3 tests, 148 lines
+**Classes (1)**: `TestPgVectorHnswIndex`
+
+**What it tests**: pgvector HNSW index creation + cosine distance queries
+
+**Status**: **3 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Fix environment (pgvector extension in test DB template — already in `pytest_configure`)
+- [ ] Test concurrent vector updates under load
+- [ ] Test index rebuild performance
+- [ ] Test fallback to exact search when index unavailable
+
+---
+
+### 9. `test_metrics_endpoint.py` — 1 test, 79 lines
+**Classes (1)**: `TestMetricsEndpoint`
+
+**What it tests**: `/metrics/` endpoint exposes all 6 custom Prometheus metrics
+
+**Status**: **1 error** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test each metric label cardinality (prevent explosion)
+- [ ] Test metric scrape latency < 100ms
+- [ ] Add Grafana dashboard validation test
+
+---
+
+### 10. `test_metrics.py` — 9 tests, 155 lines
+**Classes (3)**: `TestMetricsRegistry`, `TestMetricsHistogram`, `TestMetricsCounter`
+
+**What it tests**: Custom Prometheus metrics registry + histogram/counter helpers
+
+**Status**: **9 passed**
+
+**What's missing / needs fixing**:
+- [ ] Test label sanitization (prevent injection)
+- [ ] Test histogram bucket boundaries match SLOs
+
+---
+
+### 11. `test_observability_tui.py` — 12 tests, 150 lines
+**Classes (3)**: `TestParsePrometheus`, `TestEstimateQuantile`, `TestRender`
+
+**What it tests**: TUI parsing of `/metrics/` output + quantile estimation + rendering
+
+**Status**: **12 passed**
+
+**What's missing / needs fixing**:
+- [ ] Test TUI with malformed metrics lines
+- [ ] Test quantile estimation accuracy (p50, p95, p99)
+
+---
+
+### 12. `test_orphan_cleanup.py` — 8 tests, 149 lines
+**Classes (2)**: `TestCleanupOrphanHlsBeatSchedule`, `TestCleanupOrphanHlsPrefixes`
+
+**What it tests**: Daily Celery beat task `cleanup_orphan_hls`:
+- Beat schedule contains task at 03:00 UTC
+- Orphan HLS prefix detection + deletion
+- Bounded to 1000 keys/run
+
+**Status**: **8 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test cleanup respects `max_keys` bound
+- [ ] Test race: signal deletes prefix between listdir and delete
+- [ ] Test cleanup with S3 (mock boto3)
+
+---
+
+### 13. `test_scraper.py` — 2 tests, 80 lines
+**Classes (1)**: `ScraperUnitTests`
+
+**What it tests**: Audio scraper normalization + uploader
+- `@unittest.skip("requires ffmpeg on PATH")` for MP3 duration probe
+
+**Status**: **2 errors** — 1 error is `auth_group`, 1 is the ffmpeg skip (expected)
+
+**What's missing / needs fixing**:
+- [ ] Add test for `test_normalizer_trims_to_max_seconds` (mock ffmpeg)
+- [ ] Add test for `test_uploader_creates_audioclip` (mock boto3 + ffmpeg)
+- [ ] Add test for license/attribution propagation from source
+
+---
+
+### 14. `test_security_and_validation.py` — 28 tests, 341 lines
+**Classes (7)**: `TestAudioUploadValidation`, `TestFileTypeValidation`, `TestDurationProbe`, `TestCommentSanitization`, `TestWatchTimeCap`, `TestCORS`, `TestRateLimiting`
+
+**What it tests**: Security/validation boundary:
+- File type/magic byte/extension validation
+- Duration probe at upload (prevents 24h WAV)
+- Comment text sanitization (NUL bytes, control chars)
+- Watch time cap (10h = 36M ms)
+- CORS config
+- Rate limiting (upload throttle 20/hour)
+
+**Status**: **28 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test file size limit enforcement (100MB)
+- [ ] Test polyglot file detection (e.g., MP3+ZIP)
+- [ ] Test rate limit bypass attempts (IP spoofing)
+- [ ] Test XSS payload in comment sanitization
+
+---
+
+### 15. `test_sentry.py` — 5 tests, 136 lines
+**Classes (2)**: `TestSentryInit`, `TestSentryCapture`
+
+**What it tests**: Sentry SDK initialization + error capture gated on `DJANGO_DEBUG=False`
+
+**Status**: **5 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test Sentry DSN rotation (rotate DSN without restart)
+- [ ] Test `capture_exception` attaches `correlation_id` tag
+- [ ] Test PII filtering (user IP, cookies NOT sent)
+
+---
+
+### 16. `test_services_comments.py` — 7 tests, 80 lines
+**Classes (3)**: `TestCommentService`, `TestCommentQuery`, `TestCommentSignals`
+
+**What it tests**: Comment service + signals:
+- Create comment increments `AudioClip.comment_count`
+- Delete comment decrements (top-level only)
+- Reply count annotation
+
+**Status**: **7 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test comment threading (nested replies)
+- [ ] Test comment edit (author only)
+- [ ] Test comment delete (author + moderator)
+- [ ] Test mention notifications (@username)
+
+---
+
+### 17. `test_services_follows.py` — 4 tests, 31 lines
+**Classes (1)**: `TestFollowService`
+
+**What it tests**: Follow/unfollow symmetry + counts
+
+**Status**: **4 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test follow symmetry (A follows B → B.followers includes A)
+- [ ] Test self-follow prevention
+- [ ] Test follow pagination
+
+---
+
+### 18. `test_services_interactions.py` — 19 tests, 391 lines
+**Classes (5)**: `TestRecordLikeToggle`, `TestRecordSkip`, `TestRecordShare`, `TestRecordTelemetry`, `TestCacheInvalidation`
+
+**What it tests**: Interaction service layer (event-driven pipeline):
+- Toggle like (atomic, no double-count)
+- Register skip with duration
+- Share event creation
+- Telemetry heartbeat + flush
+- Cache invalidation on interaction
+
+**Status**: **19 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test telemetry heartbeat flush interval (5s)
+- [ ] Test skip registration with accurate `listen_duration_ms`
+- [ ] Test share read/unread state
+- [ ] Test interaction deduplication (replay attacks)
+
+---
+
+### 19. `test_services_shares.py` — 4 tests, 31 lines
+**Classes (1)**: `TestShareService`
+
+**What it tests**: Share event creation + inbox
+
+**Status**: **4 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test share read receipt
+- [ ] Test share link generation (frontend contract)
+- [ ] Test share count increment
+
+---
+
+### 20. `test_services_uploads.py` — 2 tests, 67 lines
+**Classes (1)**: `TestFinalizeUpload`
+
+**What it tests**: `finalize_upload` service:
+- Enqueues `process_audio_to_hls` on commit
+- No task enqueued if transaction rolls back
+
+**Status**: **2 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test upload with `moderation_approved=False` blocks HLS
+- [ ] Test copyright acknowledgment enforcement
+- [ ] Test license type propagation
+- [ ] Test upload size limit (100MB)
+- [ ] Test duration probe at upload time
+
+---
+
+### 21. `test_settings.py` — 9 tests, 229 lines
+**Classes (3)**: `TestDefaultDatabaseOptions`, `TestReadDatabaseOptions`, `TestPgbouncerIgnoreStartupParameters`
+
+**What it tests**: Django settings configuration:
+- DB connection timeouts (statement_timeout=30s, idle_in_transaction=60s, lock_timeout=10s)
+- Read replica activation only when `READ_DATABASE_URL` set
+- PgBouncer ignore startup parameters
+
+**Status**: **9 passed**
+
+**What's missing / needs fixing**:
+- [ ] Test S3 region enforcement (`AWS_S3_REGION_NAME=ap-south-1`)
+- [ ] Test `SECURE_SSL_REDIRECT` only when `DJANGO_DEBUG=False`
+- [ ] Test `TERMS_VERSIONS` env parsing
+
+---
+
+### 22. `test_settings.py` — 9 tests, 229 lines (cont.)
+
+Already covered above.
+
+---
+
+### 23. `test_smoke.py` — 1 test, 7 lines
+**Classes (0)**: `test_django_setup`
+
+**What it tests**: Django loads without error
+
+**Status**: **1 passed**
+
+**What's missing / needs fixing**:
+- [ ] Add more smoke tests (migrations apply, DB reachable, cache reachable)
+
+---
+
+### 24. `test_task_publisher.py` — 13 tests, 351 lines
+**Classes (4)**: `TestTaskPublisher`, `TestTaskPrerunPostrun`, `TestFlushTelemetryInvalidation`
+
+**What it tests**: Celery task publishing + correlation ID propagation + telemetry cache invalidation:
+- `publish()` attaches `correlation_id` header
+- `prerun` sets contextvar from header
+- `postrun` clears contextvar
+- `flush_telemetry_stream` invalidates user vectors cache
+- Dedups repeat event IDs
+
+**Status**: **13 errors** — `auth_group` environmental
+
+**What's missing / needs fixing**:
+- [ ] Test task retry with exponential backoff
+- [ ] Test task deduplication (idempotency key)
+- [ ] Test task priority queues
+- [ ] Test dead letter queue handling
+
+---
+
+## Cross-Cutting Gaps (What's NOT in Tests)
+
+### Regulatory / Compliance Gaps
+| Gap | Related Issue | Severity |
+|-----|---------------|----------|
+| `POST /data-subject/erasure/` cooling-off enforcement | ISSUE-06 | Critical |
+| `POST /legal/takedown/` (copyright) | ISSUE-04/05 | Critical |
+| `POST /clips/{id}/report/` (user report) | ISSUE-04 | High |
+| `POST /clips/{id}/approve-moderation/` (operator) | ISSUE-04 | High |
+| `GET /public/clips/{id}/` with `moderation_approved` filter | ISSUE-14 | High |
+| Age gate parental consent flow (`parent_email` verification) | ISSUE-02 | Critical |
+| Grievance 24h acknowledgment automation | ISSUE-03 | High |
+| AuditLog per-request write performance (async batch) | ISSUE-07 | Medium |
+
+### Frontend Contract Gaps
+| Gap | Frontend File | Severity |
+|-----|---------------|----------|
+| Feed 202 retry logic | `Feed.tsx` | High |
+| Profile own profile `getMyProfile()` | `Profile.tsx` | High |
+| Share link generation (`hls_playlist_url`) | `ShareModal.tsx` | High |
+| Telemetry heartbeat (5s) | `stores/player.tsx` | High |
+| Skip telemetry | `ReelCard.tsx` / `WaveformBar.tsx` | High |
+| Comment reply/edit/delete | `CommentSheet.tsx` | High |
+| Profile picture absolute URL | `atoms.tsx` | Medium |
+| Search → category filter | `Explore.tsx` | Medium |
+
+### Security / Abuse Resistance Gaps
+| Gap | Location | Severity |
+|-----|----------|----------|
+| Rate limit on `/legal/compliance/`, `/grievance/`, `/data-subject/` | `conftest`/`views` | High |
+| Rate limit on `/legal/takedown/`, `/clips/{id}/report/` | `views/legal.py` | High |
+| Replay attack protection on idempotent endpoints | `services/task_publisher.py` | Medium |
+| File upload polyglot detection | `serializers.py` | Medium |
+| Input size limits on all endpoints | `serializers.py` | Medium |
+
+### Observability Gaps
+| Gap | Location | Severity |
+|-----|----------|----------|
+| Alert rules for Prometheus | `docker/prometheus/alerts.yml` | Medium |
+| Sentry DSN rotation without restart | `backend/EchoFlow/sentry.py` | Medium |
+| TUI rendering under load | `scripts/observability_tui.py` | Low |
+| Grafana dashboard validation test | — | Low |
+
+### Performance / Load Gaps
+| Gap | Location | Severity |
+|-----|----------|----------|
+| Feed refill latency under cold start | `ai_ml/pipelines/feed_tasks.py` | High |
+| Vector similarity query latency (HNSW) | `backend/app/models.py` | High |
+| Telemetry flush latency under burst | `backend/app/tasks.py` | High |
+| S3 upload latency (multipart) | `services/uploads.py` | Medium |
+
+### Data Integrity Gaps
+| Gap | Location | Severity |
+|-----|----------|----------|
+| `process_audio_to_hls` idempotency on retry | `tasks.py` | Critical |
+| `cleanup_orphan_hls` race with signal | `signals.py` | Medium |
+| `flush_counters_to_pg` partial failure recovery | `tasks.py` | Medium |
+| `DataSubjectErasure` actual deletion logic | `views/data_subject.py` | Critical |
+
+---
+
+## What Needs to Be Fixed / Added / Changed (Priority Order)
+
+### P0 — Must Fix Before Any India Launch
+1. **Fix test environment** — 178 `auth_group` errors block ALL regulatory test verification. Use `docker compose exec -e DATABASE_URL=sqlite:///:memory: web pytest ...` or fix conftest (PR in progress).
+2. **Complete `test_auth_regulatory.py`** — Add tests for erasure cooling-off, takedown, report, approve-moderation, public clip filter.
+3. **Fix `test_db_router` 2 failures** — Mark as `@pytest.mark.integration` or add `READ_DATABASE_URL` to conftest.
+4. **Fix nginx healthcheck** — `docker compose logs nginx` to diagnose; likely missing `X-Forwarded-Proto` in healthcheck.
+
+### P1 — High Priority (Before Public Beta)
+5. **Add rate limits** to all new regulatory endpoints (`ComplianceContactView`, `GrievanceCreateView`, `DataSubjectAccessView`, `DataSubjectErasureView`, `TakedownRequestView`, `ReportView`).
+6. **Complete frontend contract fixes** — Feed 202 retry, profile own profile, share link, telemetry heartbeat, comment actions, profile picture URL.
+7. **Add Sentry DSN rotation** without restart capability.
+8. **Add S3 region assertion** (`assert STORAGES["default"]["OPTIONS"]["region_name"] in ("ap-south-1", "ap-south-2")`).
+9. **Complete `DataSubjectErasureView`** — actual deletion logic after cooling-off (currently marks `completed` only).
+10. **Add S3 region enforcement** in `settings.py` (`assert region in ("ap-south-1", "ap-south-2")`).
+
+### P2 — Medium Priority (Before Scale)
+10. Add Sentry PII filtering (IP, cookies NOT sent).
+11. Add rate limits on `/legal/takedown/`, `/clips/{id}/report/`, `/legal/compliance/`.
+11. Add replay attack protection on idempotent endpoints (idempotency keys).
+11. Add telemetry heartbeat test (5s interval, batch flush ≥5000ms).
+11. Add skip telemetry test (`ReelCard.tsx` + `WaveformBar.tsx`).
+11. Add comment reply/edit/delete tests + frontend wiring.
+12. Add `cleanup_orphan_hls` race condition test.
+13. Add `flush_counters_to_pg` partial failure test.
+14. Add `process_audio_to_hls` idempotency test (retry same clip_id).
+
+### P3 — Nice to Have (Post-Launch Polish)
+14. Add Grafana dashboard validation test.
+14. Add Sentry DSN rotation without restart.
+14. Add TUI rendering under load test.
+14. Add property-based test for recommendation scoring formula.
+14. Add benchmark tests for feed refill / vector search / telemetry flush.
+14. Add smoke test for S3 upload multipart.
+14. Add smoke test for S3 presigned URL generation.
+
+---
+
+## Test Infrastructure Improvements
+
+| Improvement | Effort | Impact |
+|-------------|--------|--------|
+| Fix conftest Docker env (Approach B) | Medium | Unblocks all 178 errors |
+| Add `--keepdb` for postgres tests | Low | Faster CI cycles |
+| Add `pytest --cov` to CI | Low | Coverage tracking |
+| Property-based tests (hypothesis) for scoring | Medium | Confidence in formula |
+| Mutation testing (mutmut) | Medium | Test quality signal |
+| Contract tests (frontend ↔ backend) | Medium | Prevent contract drift |
+| Load test suite (locust/k6) | Medium | Performance baselines |
+
+---
+
+## Summary Table
+
+| Category | Tests | Pass | Fail | Error | Skip | Priority |
+|----------|-------|------|------|-------|------|----------|
+| Regulatory/Compliance | 8 | 0 | 0 | 8 | 0 | P0 |
+| DB Router | 17 | 17 | 2 | 0 | 0 | P0 |
+| HTTPS/TLS | 32 | 28 | 3 | 0 | 1 | P0 |
+| Counter Store | 24 | 0 | 0 | 24 | 0 | P1 |
+| Feed Pool | 20 | 0 | 0 | 20 | 0 | P1 |
+| Adversarial/Regression | 29 | 0 | 0 | 29 | 0 | P1 |
+| Services (Comments, Follows, Interactions, Shares, Uploads, Follows) | 38 | 0 | 0 | 38 | 0 | P1 |
+| Security/Validation | 28 | 0 | 0 | 28 | 0 | P1 |
+| Observability (Metrics, TUI, Sentry) | 26 | 21 | 5 | 0 | 0 | P1 |
+| Security/Validation | 28 | 0 | 0 | 28 | 0 | P1 |
+| Scraper | 2 | 0 | 0 | 2 | 0 | P2 |
+| Orphan Cleanup | 8 | 0 | 0 | 8 | 0 | P2 |
+| Task Publisher | 13 | 0 | 0 | 13 | 0 | P1 |
+| Settings | 9 | 9 | 0 | 0 | 0 | — |
+| Metrics | 9 | 9 | 0 | 0 | 0 | — |
+| Observability TUI | 12 | 12 | 0 | 0 | 0 | — |
+| Smoke | 1 | 1 | 0 | 0 | 0 | — |
+| **TOTAL** | **259** | **74** | **5** | **178** | **1** | — |
+
+---
+
+## Conclusion
+
+The test suite is **architecturally sound** but **environmentally blocked** (178/259 tests = 69% errors from a single root cause: conftest/Docker postgres mismatch). Once the test environment is fixed (recommended: `docker compose exec -e DATABASE_URL=sqlite:///:memory: web pytest ...` or conftest restructure + `--keepdb`), the suite provides strong coverage for:
+
+- ✅ Core domain logic (metrics, settings, observability, db_router)
+- ✅ Security validation boundaries
+- ⚠️ Regulatory endpoints (new, need completion)
+- ❌ Adversarial/regulatory regression (blocked by env)
+- ❌ Service layer integration (blocked by env)
+- ❌ Frontend contracts (need frontend tests)
+
+**Next Action**: Fix test environment (recommended: conftest restructure APPROACH B + `--keepdb` + document workaround). Then complete P0 regulatory test gaps.

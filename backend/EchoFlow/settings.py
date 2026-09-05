@@ -489,6 +489,11 @@ STORAGES = {
     },
 }
 
+# SECURITY / REGULATORY: Enforce India S3 region for DPDP / RBI compliance.
+# DECISION: Runtime assertion rather than silent fallback; production must
+# explicitly set ap-south-1 (or ap-south-2) or the app fails to start.
+assert STORAGES["default"]["OPTIONS"]["region_name"] in ("ap-south-1", "ap-south-2", "auto"),     "STORAGES region must be set to ap-south-1, ap-south-2 (AWS S3 / DPDP / RBI) or "auto" (Cloudflare R2). Set AWS_S3_REGION_NAME in .env."
+
 # PUBLIC_MEDIA_ENDPOINT_URL: the endpoint a BROWSER can actually reach, as
 # opposed to AWS_S3_ENDPOINT_URL above (which is what containers use to talk
 # to the bucket over the Docker-internal network). These are frequently
@@ -535,6 +540,9 @@ REST_FRAMEWORK = {
         'share_send': '100/hour',   # ShareViewSet.send_share (anti-spam)
         'share_poll': '1000/hour',  # ShareViewSet inbox/unread/mark-read (client polling)
         'interaction': '60/min',    # toggle_like, register_skip
+        'legal': '30/hour',       # ComplianceContactView / TakedownRequestView (issue-03/05)
+        'grievance': '10/hour',   # GrievanceCreateView (issue-03)
+        'data_subject': '5/hour', # DataSubjectAccessView / Erasure (issue-06)
     },
 }
 # lets set lifetimes for tokens
@@ -568,7 +576,7 @@ LOGGING = {
     'formatters': {
         'json': {
             '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
-            'fmt': '%(asctime)s %(name)s %(levelname)s %(correlation_id)s %(message)s',
+            'fmt': '%(asctime)s %(name)s %(levelname)s %(correlation_id)s user=%(user_id)s ip=%(client_ip)s endpoint=%(endpoint_path)s %(message)s',
         },
     },
     'handlers': {
@@ -617,4 +625,13 @@ if not DEBUG:
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
+
+# DECISION: Regulatory settings (TERMS_VERSIONS, compliance/grievance/nodal contacts) live in settings.py rather than a DB table so they are env-driven and change without migration. Tradeoff: no audit trail of officer changes (operational, not regulatory requirement); DB table would require migration per change. See models.py Grievance/AuditLog for DB-level audit of grievances and identity.
+TERMS_VERSIONS = os.environ.get('TERMS_VERSIONS', 'v1.0').split(',')
+COMPLIANCE_OFFICER_NAME = os.environ.get('COMPLIANCE_OFFICER_NAME', 'EchoFlow Compliance Officer')
+COMPLIANCE_OFFICER_EMAIL = os.environ.get('COMPLIANCE_OFFICER_EMAIL', 'compliance@echoflow.in')
+GRIEVANCE_OFFICER_NAME = os.environ.get('GRIEVANCE_OFFICER_NAME', 'EchoFlow Grievance Officer')
+GRIEVANCE_OFFICER_EMAIL = os.environ.get('GRIEVANCE_OFFICER_EMAIL', 'grievance@echoflow.in')
+NODAL_CONTACT_NAME = os.environ.get('NODAL_CONTACT_NAME', 'EchoFlow Nodal Contact')
+NODAL_CONTACT_EMAIL = os.environ.get('NODAL_CONTACT_EMAIL', 'nodal@echoflow.in')
 VERSION = '1.0.0'

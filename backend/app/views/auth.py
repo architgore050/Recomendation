@@ -1,4 +1,5 @@
 """Auth view: registration."""
+# DECISION: RegisterView uses AllowAny (public endpoint) with a strict throttle_scope ("register") rather than IsAuthenticated. This aligns with DPDP consent capture at registration time — every user must be able to create an account, but account-creation spam is rate-limited per IP. Tradeoff: open endpoint requires robust validation in RegisterSerializer (consent + copyright acknowledgment) rather than relying on auth boundary.
 from django.contrib.auth import get_user_model
 from rest_framework import generics
 from rest_framework.permissions import AllowAny

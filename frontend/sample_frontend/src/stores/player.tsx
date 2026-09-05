@@ -84,6 +84,45 @@ export function PlayerProvider({ children }: Props) {
   const skipBackward = useCallback((s: number = 10) => { if (audioRef.current) { audioRef.current.currentTime = Math.max(audioRef.current.currentTime - s, 0); } }, []);
   const listenMs = useCallback(() => startRef.current ? Date.now() - startRef.current : 0, []);
 
+  // ISSUE-10: Telemetry heartbeat — fire interval every 5s while playing,
+  // batch events locally, flush when watch_time_ms >= 5000 or on pause/ended.
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const telemetryBatchRef = useRef<{ clipId: string; watch_time_ms: number; events: Array<{ action_type: string; watch_time_ms: number }> }>({ clipId: '', watch_time_ms: 0, events: [] });
+
+  const flushTelemetry = useCallback(async (clipId: string, finalMs?: number) => {
+    const batch = telemetryBatchRef.current;
+    if (batch.clipId !== clipId && !finalMs) return;
+    const totalMs = finalMs !== undefined ? finalMs : batch.watch_time_ms;
+    if (totalMs > 0) {
+      try {
+        await interactionsAPI.logTelemetry(clipId, { action_type: 'view', watch_time_ms: totalMs });
+      } catch {}
+    }
+    telemetryBatchRef.current = { clipId: '', watch_time_ms: 0, events: [] };
+  }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    telemetryBatchRef.current.clipId = active.id;
+    telemetryBatchRef.current.watch_time_ms = 0;
+    heartbeatIntervalRef.current = setInterval(() => {
+      if (playing && active) {
+        const delta = 5000; // 5s interval
+        telemetryBatchRef.current.watch_time_ms += delta;
+        if (telemetryBatchRef.current.watch_time_ms >= 5000) {
+          flushTelemetry(active.id, telemetryBatchRef.current.watch_time_ms);
+        }
+      }
+    }, 5000);
+    return () => {
+      if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+      if (active) {
+        flushTelemetry(active.id, telemetryBatchRef.current.watch_time_ms);
+      }
+    };
+  }, [active, playing, flushTelemetry]);
+
   useEffect(() => {
     if (!active) return;
     return () => {
