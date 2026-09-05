@@ -17,13 +17,34 @@ from .task_publisher import publish
 
 
 def finalize_upload(clip: AudioClip) -> None:
-    """Schedule HLS processing for `clip` after the current transaction commits.
+    """Prepare upload for moderation (v1 Option A). HLS processing is
+    blocked until moderation_approved is set to True by an operator.
 
-    transaction.on_commit guarantees the worker only picks up the task
-    if the row actually persisted. If the surrounding transaction rolls
-    back, no orphaned task is enqueued.
+    DECISION: We keep the original row creation (for audit/trail) but
+    do NOT enqueue process_audio_to_hls until moderation passes.
+    Tradeoff: Prohibited content is stored temporarily in object
+    storage but never rendered to users (feed filter blocks it).
+    A future Option B (StagingClip) avoids storage of prohibited
+    content entirely.
     """
-    # Group B item 11: route through publish() so the correlation_id
-    # from the upload request reaches the worker. Without this, the
-    # worker log line for this task has correlation_id='-'.
+    # Explicitly set moderation_approved=False (model default, but
+    # defensive for any existing rows created without it).
+    if clip.moderation_approved:
+        clip.moderation_approved = False
+        clip.save(update_fields=["moderation_approved"])
+    # Do NOT enqueue process_audio_to_hls here. The approve-moderation
+    # endpoint will enqueue it after moderation passes.
+    # HACK: We keep the transaction.on_commit for future extensibility
+    # (e.g. audit log write) but don't dispatch the HLS task.
+    transaction.on_commit(lambda: None)
+
+
+def trigger_hls_processing(clip: AudioClip) -> None:
+    """Enqueue HLS processing for an approved clip.
+
+    Called by the approve-moderation endpoint after moderation passes.
+    """
+    # Only process if moderation is approved.
+    if not clip.moderation_approved:
+        raise ValueError("Cannot trigger HLS processing for unapproved clip.")
     transaction.on_commit(lambda: publish(process_audio_to_hls, str(clip.id)))

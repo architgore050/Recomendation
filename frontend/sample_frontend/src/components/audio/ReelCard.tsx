@@ -14,7 +14,7 @@ import { ShareModal } from '../sharing/ShareModal';
 interface Props { clip: AudioClip; onProfileClick?: (id: number) => void; }
 
 export function ReelCard({ clip, onProfileClick }: Props) {
-  const { active, playing: globalPlaying, play, skipForward, skipBackward } = usePlayer();
+  const { active, playing: globalPlaying, play, skipForward, skipBackward, listenMs, progress, duration } = usePlayer();
   const { user } = useAuth();
   const toast = useToast();
   const isActive = active?.id === clip.id;
@@ -284,7 +284,7 @@ export function ReelCard({ clip, onProfileClick }: Props) {
 
           {/* Skip controls */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, marginTop: 8 }}>
-            <button onClick={() => skipForward(10)} style={{
+            <button onClick={() => { skipForward(10); interactionsAPI.registerSkip(clip.id, { listen_duration_ms: listenMs(), reel_position_ms: Math.round(duration * progress * 1000), reel_id: clip.id }).catch(() => {}); }} style={{
               width: 40, height: 40, borderRadius: 'var(--radius-full)',
               border: '1px solid rgba(255,255,255,0.2)',
               background: 'var(--surface-overlay)', backdropFilter: 'blur(10px)',
@@ -293,7 +293,7 @@ export function ReelCard({ clip, onProfileClick }: Props) {
             }} title="Skip forward 10s">
               <SkipForward size={16} />
             </button>
-            <button onClick={() => skipBackward(10)} style={{
+            <button onClick={() => { skipBackward(10); interactionsAPI.registerSkip(clip.id, { listen_duration_ms: listenMs(), reel_position_ms: Math.round(duration * progress * 1000), reel_id: clip.id }).catch(() => {}); }} style={{
               width: 40, height: 40, borderRadius: 'var(--radius-full)',
               border: '1px solid rgba(255,255,255,0.2)',
               background: 'var(--surface-overlay)', backdropFilter: 'blur(10px)',

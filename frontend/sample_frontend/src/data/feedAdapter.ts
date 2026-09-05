@@ -15,14 +15,34 @@ export const isDemoMode = (): boolean => demoMode;
 
 function delay(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-export async function fetchFeed(): Promise<{ clips: AudioClip[]; hasMore: boolean; err: string | null }> {
+export async function fetchFeed(): Promise<{ clips: AudioClip[]; hasMore: boolean; err: string | null; degraded?: boolean; retry_after_ms?: number; status?: number; message?: string }> {
   if (demoMode) {
     await delay(300);
     return { clips: [...DEMO_CLIPS], hasMore: DEMO_CLIPS_PAGE_2.length > 0, err: null };
   }
   try {
-    const d: FeedResponse = await feedAPI.getFeed();
-    return { clips: d.results || [], hasMore: true, err: null };
+    const d = await feedAPI.getFeed();
+    // ISSUE-09: Handle 202 Accepted (cold-state retry) without polling storm.
+    if (d.status === 202 || d.retry_after_ms !== undefined) {
+      return {
+        clips: d.results || [],
+        hasMore: false,
+        degraded: d.degraded || false,
+        retry_after_ms: d.retry_after_ms || 1500,
+        status: d.status || 202,
+        message: d.message || '',
+        err: null,
+      };
+    }
+    return {
+      clips: d.results || [],
+      hasMore: true,
+      degraded: d.degraded || false,
+      retry_after_ms: d.retry_after_ms,
+      status: d.status,
+      message: d.message,
+      err: null,
+    };
   } catch {
     setBackendStatus(false);
     return { clips: [...DEMO_CLIPS], hasMore: true, err: null };

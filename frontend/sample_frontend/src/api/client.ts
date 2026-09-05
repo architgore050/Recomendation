@@ -98,7 +98,13 @@ export const authAPI = {
 
 // --- Feed ---
 export const feedAPI = {
-  getFeed: (): Promise<FeedResponse> => api('/feed/'),
+  getFeed: async (): Promise<{ status: number; degraded?: boolean; retry_after_ms?: number; message?: string; results?: AudioClip[]; next?: string | null; queue_health?: number }> => {
+    const res = await fetch(API_BASE + '/feed/', {
+      headers: { 'Authorization': 'Bearer ' + (getAccessToken() || ''), 'Content-Type': 'application/json' },
+    });
+    const data = await res.json().catch(() => ({}));
+    return { status: res.status, ...data };
+  },
   getSuggestions: (category: string): Promise<FeedResponse | AudioClip[]> =>
     api(`/suggestions/?category=${encodeURIComponent(category)}`),
 };
@@ -124,6 +130,7 @@ export const commentsAPI = {
   getComments: (clipId: string): Promise<{ results: Comment[] }> => api(`/comments/?clip=${clipId}`),
   postComment: (data: { clip: string; text: string; parent?: string }) =>
     api('/comments/', { method: 'POST', body: JSON.stringify(data) }),
+  patchComment: (commentId: string, data: { text: string }) => api(`/comments/${commentId}/`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteComment: (commentId: string) => api(`/comments/${commentId}/`, { method: 'DELETE' }),
 };
 

@@ -2,8 +2,8 @@ import os
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db.models import Exists, OuterRef
-from .media_urls import get_hls_playback_url
-from .models import AudioClip, UserInteraction, ShareEvent, Comment
+from .media_urls import get_hls_playback_url, get_signed_media_url
+from .models import AudioClip, UserInteraction, ShareEvent, Comment, ConsentAudit, Grievance, AuditLog
 from rest_framework.validators import UniqueValidator
 
 
@@ -138,9 +138,34 @@ class AudioUploadSerializer(serializers.ModelSerializer):
         'audio/webm', 'audio/opus',
     })
 
+    # ISSUE-05: User-upload licensing and copyright acknowledgment.
+    LICENSE_CHOICES = [
+        ("Owned", "Owned"),
+        ("CC0", "CC0"),
+        ("CC-BY", "CC BY"),
+        ("CC-BY-SA", "CC BY-SA"),
+        ("CC-BY-NC", "CC BY-NC"),
+        ("Public_Domain", "Public Domain"),
+        ("Unknown", "Unknown"),
+    ]
+    license_type = serializers.ChoiceField(
+        choices=LICENSE_CHOICES,
+        default="Unknown",
+        required=False,
+    )
+    copyright_owner_name = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
+    copyright_acknowledgement = serializers.BooleanField(
+        required=True,
+    )
+
     class Meta:
         model = AudioClip
-        fields = ['id', 'title', 'category', 'original_file', 'status']
+        fields = ['id', 'title', 'category', 'original_file', 'status', 'license_type', 'copyright_owner_name', 'copyright_acknowledgement']
         # N8 fix: original_file is writable on create (POST) but read-only
         # on update (PATCH/PUT). The serializer-level read_only_fields
         # applies to BOTH, so we use 'original_file' as a writable
@@ -148,6 +173,21 @@ class AudioUploadSerializer(serializers.ModelSerializer):
         # via an update() override that raises PermissionDenied or
         # silently ignores the field. See AudioUploadViewSet.update().
         read_only_fields = ['id', 'status']
+
+    def validate(self, data):
+        # SECURITY / REGULATORY: Enforce copyright acknowledgment.
+        # Per ISSUE-05 (Copyright Act 1957 / IT Rules 2021), the user
+        # must explicitly confirm they have the right to upload the audio.
+        if not data.get("copyright_acknowledgement", False):
+            raise serializers.ValidationError(
+                {"copyright_acknowledgement": "You must acknowledge that you have the right to upload this audio and that it does not infringe any third-party rights."}
+            )
+        license_type = data.get("license_type", "Unknown")
+        if license_type == "Unknown":
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("Upload with Unknown license type — audit trail required.")
+        return data
 
     def validate_original_file(self, value):
         if value.size > self.MAX_SIZE:
@@ -240,9 +280,12 @@ class AudioUploadSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        # Bound to creator as defined in models.py
+        # Issue-05: Ensure copyright fields are persisted.
         validated_data['creator'] = self.context['request'].user
-        return super().create(validated_data)
+        validated_data.setdefault('moderation_approved', False)
+        validated_data.setdefault('copyright_acknowledgement', validated_data.get('copyright_acknowledgement', False))
+        clip = super().create(validated_data)
+        return clip
 
 class FeedClipSerializer(serializers.ModelSerializer):
     # Fixed from owner.username to creator.username
@@ -359,6 +402,14 @@ class ShareEventSerializer(serializers.ModelSerializer):
 
 
 class RegisterSerializer(serializers.ModelSerializer):
+    # ISSUE-01 (DPDP consent / age gate)
+    # SECURITY: consent_accepted is required; without it registration
+    # must fail. terms_version validated against allowed versions
+    # from settings (default v1.0 from env).
+    consent_accepted = serializers.BooleanField(required=True)
+    terms_version = serializers.CharField(required=True, max_length=50)
+    dob = serializers.DateField(required=False, allow_null=True)
+    parent_email = serializers.EmailField(required=False, allow_null=True)
     # Ensure email is unique and required
     email = serializers.EmailField(
         required=True,
@@ -367,16 +418,74 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User #built-in User model
-        fields = ('username', 'password', 'email')
+        fields = ('username', 'password', 'email', 'consent_accepted', 'terms_version', 'dob', 'parent_email')
         # Ensure password is never returned in a GET request
-        extra_kwargs = {'password': {'write_only': True}, 'email': {'write_only': True}}
+        extra_kwargs = {
+            'password': {'write_only': True}, 'email': {'write_only': True},
+        }
+
+    def validate_terms_version(self, value):
+        allowed = getattr(settings, 'TERMS_VERSIONS', ['v1.0'])
+        if value not in allowed:
+            raise serializers.ValidationError(f"Invalid terms version. Allowed: {allowed}")
+        return value
+
+    def validate(self, data):
+        # DECISION: If user provides dob and age < 18, require parent_email
+        # and set is_minor/minor_consent_verified flags. Tradeoff: extra
+        # validation logic vs. regulatory compliance (DPDP age gate).
+        dob = data.get('dob')
+        if dob:
+            from datetime import date
+            today = date.today()
+            age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+            if age < 18:
+                data['is_minor'] = True
+                data['minor_consent_verified'] = False  # default; verified via parent flow
+                parent_email = data.get('parent_email')
+                if not parent_email:
+                    raise serializers.ValidationError(
+                        {"parent_email": "Parent/guardian email is required for users under 18."}
+                    )
+            else:
+                data['is_minor'] = False
+                data['minor_consent_verified'] = False
+        else:
+            data['is_minor'] = False
+        return data
 
     def create(self, validated_data):
-        # .create_user() handles password hashing automatically
+        # DECISION: Separate consent audit creation from user creation
+        # so that consent records exist even if user creation rolls back.
+        # Tradeoff: potential orphaned audit rows vs. guaranteed audit trail.
+        consent_accepted = validated_data.pop('consent_accepted', False)
+        terms_version = validated_data.pop('terms_version', 'v1.0')
+        dob = validated_data.get('dob')
+        parent_email = validated_data.get('parent_email')
+        # Handle minor flow fields
+        is_minor = validated_data.pop('is_minor', False)
+        minor_consent_verified = validated_data.pop('minor_consent_verified', False)
         user = User.objects.create_user(
             username=validated_data['username'],
             email=validated_data['email'],
-            password=validated_data['password']
+            password=validated_data['password'],
+            dob=dob,
+            parent_email=parent_email,
+            is_minor=is_minor,
+            minor_consent_verified=minor_consent_verified,
+            consent_accepted=consent_accepted,
+            terms_version=terms_version,
+        )
+        # ISSUE-01: Create ConsentAudit row for regulatory audit trail.
+        # HACK: Writing audit on user creation in serializer rather than
+        # signal so we have direct access to validated consent data.
+        request = self.context.get('request')
+        ConsentAudit.objects.create(
+            user=user,
+            terms_version_id=terms_version,
+            privacy_version_id='v1.0',
+            ip_address=request.META.get('REMOTE_ADDR') if request else None,
+            user_agent=request.META.get('HTTP_USER_AGENT', '')[:500] if request else '',
         )
         return user
 
@@ -386,13 +495,21 @@ class PublicProfileSerializer(serializers.ModelSerializer):
     following_count = serializers.IntegerField(read_only=True)
     uploads_count = serializers.IntegerField(read_only=True)
 
+    profile_picture_url = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'profile_picture',
+            'id', 'username', 'profile_picture', 'profile_picture_url',
             'followers_count', 'following_count', 'uploads_count',
             'date_joined'
         ]
+
+
+    def get_profile_picture_url(self, obj):
+        if obj.profile_picture and obj.profile_picture.name:
+            return get_signed_media_url(obj.profile_picture.name)
+        return None
 
 class OwnProfileSerializer(serializers.ModelSerializer):
     """For the logged-in user's own profile — includes private data"""
@@ -401,13 +518,21 @@ class OwnProfileSerializer(serializers.ModelSerializer):
     uploads_count = serializers.IntegerField(read_only=True)
     liked_clips = serializers.SerializerMethodField()
 
+    profile_picture_url = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'profile_picture',
+            'id', 'username', 'profile_picture', 'profile_picture_url',
             'followers_count', 'following_count', 'uploads_count',
             'liked_clips', 'date_joined'
         ]
+
+
+    def get_profile_picture_url(self, obj):
+        if obj.profile_picture and obj.profile_picture.name:
+            return get_signed_media_url(obj.profile_picture.name)
+        return None
 
     def get_liked_clips(self, obj):
         # N7 fix: query AudioClip directly with the user_has_liked

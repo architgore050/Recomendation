@@ -5,6 +5,7 @@ export interface User {
   first_name?: string;
   last_name?: string;
   profile_picture?: string | null;
+  profile_picture_url?: string | null;
   date_joined?: string;
   followers_count?: number;
   following_count?: number;
@@ -74,6 +75,7 @@ export interface UserProfile {
   first_name?: string;
   last_name?: string;
   profile_picture?: string | null;
+  profile_picture_url?: string | null;
   followers_count: number;
   following_count: number;
   uploads_count: number;

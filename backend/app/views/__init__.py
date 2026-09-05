@@ -35,4 +35,13 @@ __all__ = [
     'SuggestionViewSet',
     'RegisterView',
     'ProfileViewSet',
+    'ComplianceContactView',
+    'GrievanceCreateView',
+    'DataSubjectAccessView',
+    'DataSubjectErasureView',
+    'TakedownRequestView',
 ]
+
+from .legal import ComplianceContactView, TakedownRequestView
+from .grievance import GrievanceCreateView
+from .data_subject import DataSubjectAccessView, DataSubjectErasureView

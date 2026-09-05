@@ -1,4 +1,6 @@
-﻿export function Spinner({ size = 20, color = 'var(--terracotta)' }: { size?: number; color?: string }) {
+import { resolveMediaUrl } from '../../api/client';
+
+export function Spinner({ size = 20, color = 'var(--terracotta)' }: { size?: number; color?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" style={{ animation: 'spin 0.8s linear infinite' }}>
       <circle cx="12" cy="12" r="10" fill="none" stroke={color} strokeWidth="2.5"
@@ -31,7 +33,7 @@ export const inputStyle: React.CSSProperties = {
 
 export function Avatar({ src, name, size = 36 }: { src?: string | null; name?: string; size?: number }) {
   const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-  const url = src ? (src.startsWith('http') ? src : apiBase + src) : null;
+  const url = src ? (src.startsWith('http') ? src : resolveMediaUrl(src) || apiBase + src) : null;
   return (
     <div style={{
       width: size, height: size, borderRadius: 'var(--radius-full)', overflow: 'hidden', flexShrink: 0,

@@ -12,6 +12,26 @@ logger = logging.getLogger(__name__)
 
 
 class User(AbstractUser):
+    # ISSUE-01: DPDP consent / age gate fields
+    dob = models.DateField(null=True, blank=True)
+    is_minor = models.BooleanField(default=False)
+    minor_consent_verified = models.BooleanField(default=False)
+    consent_accepted = models.BooleanField(default=False)
+    terms_version = models.CharField(max_length=50, blank=True, default='')
+    parent_email = models.EmailField(blank=True, null=True)
+
+    @property
+    def computed_is_minor(self) -> bool:
+        # DECISION: Compute minor status from dob rather than relying
+        # solely on the stored bool — prevents drift if dob changes.
+        # Tradeoff: small CPU cost per access vs. data consistency.
+        if not self.dob:
+            return False
+        from datetime import date
+        today = date.today()
+        age = today.year - self.dob.year - ((today.month, today.day) < (self.dob.month, self.dob.day))
+        return age < 18
+
     # N3 fix: encrypted_email removed. The previous design encrypted
     # plaintext email on save and stored it in a TextField with unique=True,
     # but: (a) nothing ever decrypted it (no lookup-by-email, no password
@@ -35,6 +55,25 @@ class User(AbstractUser):
     profile_picture = models.ImageField(upload_to='avatars/', null=True, blank=True)
 
 
+
+
+class ConsentAudit(models.Model):
+    # ISSUE-01 (DPDP consent / age gate)
+    # DECISION: DB table for consent audit trail rather than file-based
+    # audit logs — queryable by user, withdrawable, and retainable
+    # per regulatory timeline. Tradeoff: extra table + index vs.
+    # tamper-resistant DB record.
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='consent_audits', null=True, blank=True)
+    consent_issued_at = models.DateTimeField(auto_now_add=True)
+    terms_version_id = models.CharField(max_length=50, default='v1.0')
+    privacy_version_id = models.CharField(max_length=50, default='v1.0')
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=500, blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-consent_issued_at']
+        indexes = [models.Index(fields=['user', '-consent_issued_at'])]
 
 class AudioClip(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -71,6 +110,10 @@ class AudioClip(models.Model):
     semantic_vector = VectorField(dimensions=384, null=True, blank=True)
     acoustic_vector = VectorField(dimensions=128, null=True, blank=True)
 
+    moderation_approved = models.BooleanField(default=False)
+    copyright_acknowledgement = models.BooleanField(default=False)
+    copyright_owner_name = models.CharField(max_length=255, blank=True, null=True)
+    license_type = models.CharField(max_length=100, blank=True, null=True)
     status = models.CharField(max_length=20, default='processing')
     created_at = models.DateTimeField(auto_now_add=True)
     def __str__(self):
@@ -221,3 +264,83 @@ class UserInteraction(models.Model):
                             "counter_store.increment failed for %s/%s: %s",
                             self.clip.pk, counter_type, exc,
                         )
+
+class Grievance(models.Model):
+    # ISSUE-03 (grievance / compliance) — DB table per audit recommendation.
+    # DECISION: DB table rather than env-only config for queryability
+    # and audit retention.
+    subject = models.CharField(max_length=200)
+    description = models.TextField()
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='grievances')
+    user_email = models.EmailField(blank=True, null=True)
+    status = models.CharField(max_length=20, default='received', choices=[
+        ('received', 'Received'),
+        ('acknowledged', 'Acknowledged'),
+        ('under_review', 'Under Review'),
+        ('resolved', 'Resolved'),
+    ])
+    acknowledgment_due = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', '-created_at'])]
+
+class AuditLog(models.Model):
+    # ISSUE-07 (audit identity retention)
+    # DECISION: Every request logs user, endpoint, IP, UA, correlation_id.
+    # Tradeoff: DB write overhead per request vs. complete audit trail.
+    # HACK: Using generic endpoint char field rather than full URL to
+    # limit PII exposure in audit table (path only, no query params).
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='audit_logs')
+    action = models.CharField(max_length=50, choices=[
+        ('view', 'View'), ('create', 'Create'), ('update', 'Update'),
+        ('delete', 'Delete'), ('login', 'Login'), ('register', 'Register'),
+    ])
+    endpoint = models.CharField(max_length=255, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=500, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    correlation_id = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['user', '-timestamp']),
+            models.Index(fields=['correlation_id',]),
+        ]
+
+class DataSubjectRequest(models.Model):
+    # ISSUE-06 (data-subject rights / GDPR-style access/erasure)
+    request_type = models.CharField(max_length=20, choices=[
+        ('access', 'Access'), ('erasure', 'Erasure'),
+    ])
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='data_subject_requests')
+    status = models.CharField(max_length=20, default='pending')
+    token_hash = models.CharField(max_length=128, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    cooling_off_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'request_type'])]
+
+class TakedownRequest(models.Model):
+    # ISSUE-03 / content moderation
+    clip = models.ForeignKey('AudioClip', on_delete=models.CASCADE, related_name='takedown_requests')
+    reason = models.TextField()
+    requester_email = models.EmailField()
+    status = models.CharField(max_length=20, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+class Report(models.Model):
+    # General regulatory reporting / audit artifact
+    title = models.CharField(max_length=200)
+    content = models.TextField()
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='reports')
+    status = models.CharField(max_length=20, default='open')
+    created_at = models.DateTimeField(auto_now_add=True)
+

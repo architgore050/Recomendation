@@ -1,4 +1,5 @@
 from django.urls import path, include
+# DECISION: Regulatory endpoints (/legal/compliance/, /grievance/, /data-subject/, /legal/takedown/) are registered at the router level (not nested under router register) so they remain independent of viewset basename changes and are easily discoverable by compliance scanners. Tradeoff: slightly more verbose urlpatterns vs. clear separation of regulatory vs. content routes.
 from rest_framework.routers import DefaultRouter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -8,7 +9,9 @@ from rest_framework_simplejwt.exceptions import TokenError
 from .views import (
     AudioUploadViewSet, FastFeedViewSet, ClipInteractionViewSet,
     ShareViewSet, CommentViewSet, FollowViewSet,
-    TagsViewSet, SuggestionViewSet,RegisterView,ProfileViewSet
+    TagsViewSet, SuggestionViewSet, RegisterView, ProfileViewSet,
+    GrievanceCreateView, DataSubjectAccessView, DataSubjectErasureView, ComplianceContactView,
+    TakedownRequestView
 )
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework.throttling import ScopedRateThrottle
@@ -57,6 +60,13 @@ urlpatterns = [
     path('auth/register/', RegisterView.as_view(), name='register'),
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('auth/logout/', LogoutView.as_view(), name='logout'),
+    # ISSUE-03 (grievance / compliance) and ISSUE-06 (data-subject rights)
+    # TODO: Check if they are rate-limited or throttled. If so, add ScopedRateThrottle and throttle_scope.
+    path('legal/compliance/', ComplianceContactView.as_view(), name='legal_compliance'),
+    path('legal/takedown/', TakedownRequestView.as_view(), name='legal_takedown'),
+    path('grievance/', GrievanceCreateView.as_view(), name='grievance_create'),
+    path('data-subject/access/', DataSubjectAccessView.as_view(), name='data_subject_access'),
+    path('data-subject/erasure/', DataSubjectErasureView.as_view(), name='data_subject_erasure'),
     # NOTE: no /media/ route anymore, on purpose. Media now lives in S3-
     # compatible object storage (see settings.STORAGES["default"]), not on
     # this container's disk — there is nothing local left to serve, and a

@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { AudioClip } from '../types';
 import { usePlayer } from '../stores/player';
 import { useToast } from '../stores/toast';
@@ -17,17 +17,39 @@ export function FeedPage({ go }: Props) {
   const [err, setErr] = useState<string | null>(null);
   const [initial, setInitial] = useState(true);
   const [hasMore, setHasMore] = useState(true);
+  const [degraded, setDegraded] = useState(false);
   const demo = isDemoMode();
+
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = async (isInitial = false) => {
     if (isInitial) { setInitial(true); }
     setLoading(true); setErr(null);
     try {
-      const { clips: fresh, hasMore: hm, err: e } = await fetchFeed();
+      const { clips: fresh, hasMore: hm, err: e, degraded, retry_after_ms, status, message } = await fetchFeed();
       if (e) throw new Error(e);
-      setClips(p => [...p, ...fresh]);
+      // ISSUE-09: Handle 202 Accepted (cold-state retry) without polling storm.
+      if (status === 202 || retry_after_ms !== undefined) {
+        // Temporarily disable loadMore to prevent observer storm.
+        setHasMore(false);
+        // Schedule retry after server-suggested delay.
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = setTimeout(() => {
+          load(isInitial);
+        }, retry_after_ms || 1500);
+        // Show degraded banner only on initial load when no clips.
+        setDegraded(degraded || false);
+        if (isInitial && degraded) {
+          toast('Feed preparing — retrying shortly', 'info');
+        }
+        // Do not append empty results to the list.
+        setClips(p => p);
+        return;
+      }
+      setDegraded(false);
+      setClips(p => isInitial ? fresh : [...p, ...fresh]);
       setHasMore(hm);
-       if (isInitial && fresh.length === 0) toast('Queue is empty — check back soon', 'info');
+      if (isInitial && fresh.length === 0 && !degraded) toast('Queue is empty — check back soon', 'info');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Error';
       setErr(msg);
@@ -40,13 +62,20 @@ export function FeedPage({ go }: Props) {
 
   useEffect(() => { load(true);   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    return () => { if (retryTimerRef.current) clearTimeout(retryTimerRef.current); };
+  }, []);
+
   const loadMore = () => { if (!loading && hasMore) { load(false); } };
 
   return (
     <div>
       <div style={{ padding: '56px 14px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
-          <h1 style={{
+          {degraded && (
+        <div style={{ padding: '8px 14px', background: 'rgba(255,180,171,0.1)', color: 'var(--error)', fontSize: 12, fontWeight: 600, borderBottom: '1px solid var(--outline-variant)' }}>Feed degraded — showing fallback content</div>
+      )}
+      <h1 style={{
             fontFamily: 'var(--font-display)', fontSize: 30, fontWeight: 900,
             letterSpacing: '0.04em', lineHeight: 1, color: 'var(--on-surface)'
           }}>FOR YOU</h1>

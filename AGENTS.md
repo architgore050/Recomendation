@@ -220,6 +220,17 @@ Uses Docker Compose V2 (`docker compose`, not `docker-compose`). If you have `do
 | `SENTRY_TRACES_SAMPLE_RATE` | Fraction of requests traced (0.0-1.0). Default: `0.1`. Lower for high-traffic. |
 | `SENTRY_PROFILES_SAMPLE_RATE` | Fraction of profiled requests. Default: `0.05`. |
 | `GRAFANA_ADMIN_PASSWORD` | Initial admin password for Grafana (first-boot only). Required — Grafana v11 refuses to start without one. |
+| `GRAFANA_ADMIN_PASSWORD` | Initial admin password for Grafana (first-boot only). Required — Grafana v11 refuses to start without one. |
+| `TERMS_VERSIONS` | Comma-separated consent versions (e.g. `v1.0,v1.1`). Used by `RegisterSerializer` and `ConsentAudit` (`terms_version_id`). Default: `v1.0`. See `settings.py:622`. |
+| `COMPLIANCE_OFFICER_NAME` | Chief Compliance Officer name (IT Rules 2021 Rule 4(1)(b)). Served by `/legal/compliance/`. Default: `EchoFlow Compliance Officer`. |
+| `COMPLIANCE_OFFICER_EMAIL` | CCO email. Default: `compliance@echoflow.in`. |
+| `GRIEVANCE_OFFICER_NAME` | Grievance Officer name (IT Rules 2021 Rule 4(1)(a)). Default: `EchoFlow Grievance Officer`. |
+| `GRIEVANCE_OFFICER_EMAIL` | Grievance email. Default: `grievance@echoflow.in`. |
+| `NODAL_CONTACT_NAME` | Nodal Contact name (IT Rules 2021 Rule 4(1)(c)). Default: `EchoFlow Nodal Contact`. |
+| `NODAL_CONTACT_EMAIL` | Nodal email. Default: `nodal@echoflow.in`. |
+| `AWS_S3_REGION_NAME` | **Must be `ap-south-1`** (or `ap-south-2`) for DPDP cross-border + RBI data-localisation compliance. `STORAGES` uses this (`settings.py:467`). Default in `.env.example`: `auto` — production must override. |
+| `PHYSICAL_ADDRESS` | Registered office / physical address (IT Rules 2021 / Consumer Protection). Not yet exposed in `/legal/compliance/` endpoint (open). |
+
 
 ## HTTPS / TLS Termination
 The stack now ships with an nginx reverse proxy in front of every other service. TLS is terminated at the edge; internal hops (nginx→gunicorn, nginx→minio) stay plain HTTP on the docker bridge. No application code knows TLS exists.
@@ -603,6 +614,44 @@ TODO:
 when appropriate.
 
 A `DECISION` comment should explain the chosen approach and the important trade-off.
+
+### DECISION / HACK / SECURITY / TODO tag patterns used in Agents 1-4
+
+The following patterns were applied across changed files (`serializers.py`, `middleware.py`, `models.py`, `settings.py`, `services/content_moderation.py`, `urls.py`, `views/auth.py`, `tests/test_auth_regulatory.py`):
+
+- **`DECISION:`** — `models.py:62-65` (DB audit table over file logs); `models.py:103-105` (DB-level negative counter constraints); `models.py:145-149` (CheckConstraint migration required); `middleware.py:292-293` (DB write overhead accepted for audit); `serializers.py:240-244` (pydub over ffprobe); `services/content_moderation.py:7` (v1 sha256 + blocked phrase list, offline); `services/content_moderation.py:92-94` (sha256 fingerprint sufficient for v1); `serializers.py:124` (serializer-level file validation before model); `settings.py:172-189` (psycopg2 `options` string for timeouts); `settings.py:204-233` (read-replica activation only when `READ_DATABASE_URL` set); `settings.py:245-252` (split Redis to prevent feed-spike eviction of queued tasks); `settings.py:454-456` (STORAGES dict over deprecated STATICFILES_STORAGE); `settings.py:621-629` (env-driven regulatory contacts); `AGENTS.md` (this note).
+- **`SECURITY:`** — `serializers.py:16-21` (pure-Python magic-byte allowlist as first defense); `serializers.py:128-133` (python-magic layer-2 check); `serializers.py:178-191` (copyright acknowledgment enforcement before DB persistence); `serializers.py:236-251` (duration probe at upload time to prevent 24h WAV abuse); `serializers.py:373-376` (watch_time_ms capped at 10h to prevent viewbot inflation); `serializers.py:350-365` (comment text null-byte / control-char stripping); `middleware.py:60` (audit DB failure never breaks request); `settings.py:86-88` (token_blacklist + rotation); `settings.py:467-479` (signed S3 URLs instead of public bucket); `models.py:192-195` (user identity retention for CERT-In); `services/content_moderation.py:12-14` (blocked-phrase check against lowercase transcript); `tests/test_auth_regulatory.py:52-60` (compliance endpoint requires auth + returns JSON).
+- **`HACK:`** — `models.py:294-295` (audit endpoint uses path only, no query params, to limit PII); `middleware.py:47-48` (audit DB write in finally block may fail silently if DB down — acceptable tradeoff); `serializers.py:246-250` (reading full upload into memory for pydub; needs temp-file stream if memory pressure grows); `services/content_moderation.py:16-18` (fingerprint blocklist is module-level set, not DB/Redis — production upgrade needed); `services/content_moderation.py:167-175` (AudioClip has no `transcript_text` field; moderation skips transcript check if missing — proper integration requires task-level transcript persistence).
+- **`TODO:`** — `serializers.py:250` (temp-file stream for pydub); `services/content_moderation.py:19-20` (multilingual India-specific prohibited-content database; replace blocked phrase list); `settings.py:378-379` (remove `flush_telemetry_legacy` after one stable cycle); `services/content_moderation.py:167-175` (transcript text persistence from `process_audio_to_hls` task); `docs/INDIA-REGULATORY-READINESS.md` (public clip endpoint needs `moderation_approved` filter); `AGENTS.md` (pgvector test DB setup — see below).
+
+### Pgvector test DB limitation (Agent 3 verification)
+
+Agent 3 verified that `pgvector` extension tests (`test_integration_pgvector.py`) skip on SQLite + LocMem. To enable full integration coverage:
+
+```bash
+# Inside the running web container (or in test DB setup):
+docker compose exec web python manage.py dbshell -c "CREATE EXTENSION IF NOT EXISTS vector;"
+# Or add to conftest.py / init script for persistent test DB.
+```
+
+The 6 skipped integration tests (see `AGENTS.md` §Testing & Linting) cover `HNSW` index creation (`m=16`, `ef_construction=64`), cosine-distance queries, and concurrent vector updates. Without the extension, these skip, reducing CI confidence in recommendation pipeline correctness. **Action: add to `conftest.py` or Docker `initdb.d` script before Phase B launch.**
+
+### Content Moderation Pipeline Design Note (Agent 2 / v1)
+
+The moderation pipeline (`services/content_moderation.py`) uses:
+
+1. `sha256` fingerprint of normalized file content (`DECISION`: sufficient for v1, no external dependency).
+2. Blocked-phrase substring match against lowercase transcript and AI tags (`SECURITY`: defense-in-depth before HLS generation).
+3. `AudioClip.moderation_approved` boolean (`models.py:113`) as gate: `process_audio_to_hls` should NOT run until `True`.
+
+Production upgrade options (open):
+- Move fingerprint blocklist to Redis (`_FINGERPRINT_BLOCKLIST` currently module-level set; `HACK` at line 16).
+- Replace blocked-phrase list with multilingual classifier or external moderation API (`TODO` at line 19).
+- Implement `StagingClip` promotion (audit doc proposes Option B) instead of `moderation_approved=False` on `AudioClip`.
+
+No extra `docs/EXPLAIN/` document is required unless the user explicitly requests one; the design notes above are sufficient per `AGENTS.md` §15.
+
+
 
 A `HACK` must explain why the workaround exists and what the proper replacement is.
 
