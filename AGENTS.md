@@ -545,6 +545,7 @@ Before meaningful work:
 ```bash
 git status
 git branch --show-current
+git worktree list
 ```
 
 Preserve uncommitted user changes.
@@ -553,7 +554,7 @@ Never revert or overwrite unrelated work.
 
 For risky changes:
 
-1. create a dedicated branch/Worktree from the current working branch/Worktree
+1. Always create a dedicated branch/Worktree from the current working branch/Worktree
 2. make the smallest required change
 3. validate
 4. review the complete diff
@@ -561,7 +562,7 @@ For risky changes:
 6. push only when explicitly authorized
 
 Never push automatically.
-
+Command to add a new worktree : git worktree add <path-to-new-directory> -b <new-branch-name>
 Never rewrite shared history without explicit authorization.
 
 ---
