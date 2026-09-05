@@ -210,20 +210,6 @@ tmp/
 .history
 .platform-native/
 
-# Ruby/Rails
-*.gem
-*.rbc
-.bundle/
-.config/byebug_history
-coverage/
-InstalledFiles
-pkg/
-spec/reports/
-spec/examples.txt
-test/tmp/
-test/version_tmp/
-tmp/
-
 # Go
 *.a
 _test.out
@@ -281,11 +267,6 @@ captures/
 *.framework
 *.app
 
-# Julia
-.julia/
-.julia_scratchspaces/
-.julia_artifacts/
-.julia_organizations/
 
 # Zig
 zig-cache/

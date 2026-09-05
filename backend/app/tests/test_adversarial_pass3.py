@@ -110,7 +110,6 @@ class TestN2CounterRace:
         # Net +1 after 5 toggles (started at 0, ended at active).
         assert drained['counters'][str(ready_clip.id)] == {'likes': 1}
 
-    @pytest.mark.integration
     @pytest.mark.django_db(transaction=True)
     def test_concurrent_toggles_do_not_double_count(self, user, ready_clip):
         """5 threads each call record_like_toggle 10 times. The Redis
@@ -675,17 +674,10 @@ class TestLoadConcurrentFeedAccess:
     users against an empty Redis. No 500s, no race conditions, no
     duplicate clip_ids in any user's queue."""
 
-    @pytest.mark.integration
     @pytest.mark.django_db(transaction=True)
     def test_50_concurrent_users_cold_feed(self, django_user_model, ready_clip):
         """Adversarial load: 50 concurrent feed requests from 50 different
         users against an empty Redis. No 500s, no race conditions.
-
-        Marked `integration` because the test needs real Postgres (row
-        locks, not SQLite's database lock) AND a real Redis cache (LocMem
-        has no `.client` attribute for pipeline operations). The conftest
-        autouse fixture skips this on SQLite + LocMem automatically; no
-        inline skip needed.
         """
         import threading
         from rest_framework.test import APIClient

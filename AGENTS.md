@@ -21,17 +21,17 @@ docker compose exec web python manage.py migrate
 
 ## Running Tests
 
-> **All tests must be run inside the Docker `web` container.** The local SQLite + LocMem environment can run the suite, but it cannot exercise: pgvector/HNSW indexes, Postgres row-level locks, real Redis Streams, ffmpeg in `PATH`, the MinIO storage backend, or cross-thread concurrency. The container has every dependency baked in.
+> **All tests run inside the Docker `web` container against PostgreSQL.**
+> The test database is `echoflow_test` — auto-created by conftest on first
+> run. No SQLite, no stub migrations, no bare-metal test mode.
+
+### Quick start (full stack + tests)
 
 ```bash
-# Start the stack (only first time, or after a config change)
-docker compose up --build -d
+# Build and start test stack (db, redis, minio, web)
+docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d
 
-# Run the full test suite via pytest (inside the web container).
-# PYTHONPATH=/app is required: pytest 9+ no longer auto-prepends the
-# rootdir to sys.path, so the conftest's relative `import backend...`
-# fails without it. This will be removed when we move to a proper
-# pytest `pythonpath` config setting in pytest.ini.
+# Run the full test suite (conftest auto-creates echoflow_test DB)
 docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/ --tb=short
 
 # Run a single test file
@@ -39,9 +39,6 @@ docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/test_adversa
 
 # Run a single test class
 docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/test_adversarial_pass3.py::TestN1CommentAuthorization -v
-
-# Run the Django built-in test runner (alternative to pytest)
-docker compose exec web python manage.py test backend.app --verbosity 2
 
 # Run the migration / config / static checks that CI runs
 docker compose exec web python manage.py migrate --noinput
@@ -52,10 +49,20 @@ docker compose exec web python manage.py collectstatic --noinput --dry-run
 # Inspect coverage (with the pytest-cov plugin — installed in the image)
 docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/ --cov=backend.app --cov-report=term-missing
 
-# Tail logs while a test runs against a live worker
-docker compose logs -f celery celery_feed celery_media
+# Tear down test stack
+docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+```
 
-# Tear down after testing
+### Production stack + tests (when you need nginx/MinIO endpoints)
+
+```bash
+# Start full stack (db, pgbouncer, redis, minio, nginx, web, celery, etc.)
+docker compose up --build -d
+
+# Run tests against the full stack
+docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/ --tb=short
+
+# Tear down
 docker compose down
 ```
 
@@ -281,7 +288,7 @@ GET  /profile/{id}/           # Public profile
 - **`update_global_metrics`** is a no-op stub (deprecated 2026-09). All three responsibilities (counter deltas, avg_completion_rate, engagement_velocity) live in `flush_counters_to_pg`. The Celery Beat entry is kept for one cycle so a missing task name surfaces as a deployment error.
 - **Event-driven metrics pipeline**: user interactions (`record_like_toggle`, `record_skip`, `record_share`, `record_telemetry` Tier-3 fallback) write to Redis via `counter_store.increment` / `add_completion` (O(1) on the request path). `flush_counters_to_pg` (every 5 min) drains the deltas and applies them to Postgres in batched UPDATEs that touch only the dirty clip set. No correlated subquery, no full-table scan. See [docs/EXPLAIN/decisions/event-driven-metrics.md](docs/EXPLAIN/decisions/event-driven-metrics.md).
 - **Read replica routing**: `backend/app/db_routers.py` is a 71-line `ReadRouter` with 4 hooks (db_for_read/db_for_write/allow_relation/allow_migrate). Auto-activates when `READ_DATABASE_URL` is set; the `if not atomic and not SELECT FOR UPDATE` guard prevents stale-read races inside write transactions. See [docs/EXPLAIN/database/05-read-replica-design.md](docs/EXPLAIN/database/05-read-replica-design.md).
-- **Per-session DB timeouts**: `backend/EchoFlow/settings.py` sets `statement_timeout=30s`, `idle_in_transaction_session_timeout=60s`, `lock_timeout=10s`, `connect_timeout=10s` on the default connection via libpq `options` string. Critical behind PgBouncer (25-conn pool); a slow query that held a backend connection could otherwise exhaust the pool. Gated on `ENGINE.endswith('postgresql')` so SQLite tests are unaffected.
+- **Per-session DB timeouts**: `backend/EchoFlow/settings.py` sets `statement_timeout=30s`, `idle_in_transaction_session_timeout=60s`, `lock_timeout=10s`, `connect_timeout=10s` on the default connection via libpq `options` string. Critical behind PgBouncer (25-conn pool); a slow query that held a backend connection could otherwise exhaust the pool. Gated on `ENGINE.endswith('postgresql')` so non-Postgres backends are unaffected.
 - **Cache invalidation**: `services/interactions.py::invalidate_user_vectors_cache` is called from `record_like_toggle`, `record_skip`, `record_share`, and `record_telemetry`'s sync fallback via `transaction.on_commit`. The `flush_telemetry_stream` consumer invalidates each unique user's cache after a successful `bulk_create`. Stale-vector window collapsed from 15 min to near-zero for all user-state-mutating paths.
 - **Counter store (event-driven, no dual-write)**: `services/counter_store.py` writes user-engagement counters to Redis (`INCRBY` for likes/shares/skips; `INCRBYFLOAT` + `INCR` for per-(user,clip) completion). The `UserInteraction.save()` F() side-effect was removed in the 2026-09 metrics rewrite; `flush_counters_to_pg` is the only path from Redis to Postgres. `ECHOFLOW_DUAL_WRITE_COUNTERS` is now a no-op (always False) and slated for deletion. See [docs/EXPLAIN/decisions/event-driven-metrics.md](docs/EXPLAIN/decisions/event-driven-metrics.md).
 - **HLS output**: Stored under `media/hls/{clip_id}/` on local disk. Not S3-backed yet. `cleanup_orphan_hls` Celery task (daily 03:00 UTC) prunes directories older than 1 day that are not in the `AudioClip` table — bounded to 1000 keys/run.
@@ -308,18 +315,9 @@ Uses HLS.js for playback. This is an example client — the production frontend 
 ## Testing & Linting
 - Test framework: **pytest** + `pytest-django`, installed in the `api` image. Run via `docker compose exec web pytest …` — see [Running Tests](#running-tests) for the full command set.
 - Test files live under `backend/app/tests/` (22 files: `test_adversarial_pass3.py`, `test_counter_store.py`, `test_db_router.py`, `test_feed_pool.py`, `test_https_termination.py`, `test_integration_concurrency.py`, `test_integration_pgvector.py`, `test_metrics_endpoint.py`, `test_metrics.py`, `test_observability_tui.py`, `test_orphan_cleanup.py`, `test_scraper.py`, `test_security_and_validation.py`, `test_sentry.py`, `test_services_comments.py`, `test_services_follows.py`, `test_services_interactions.py`, `test_services_shares.py`, `test_services_uploads.py`, `test_settings.py`, `test_smoke.py`, `test_task_publisher.py`).
-- Current count: **230 passed, 9 skipped, 0 failed** (9 skipped = 2 ffmpeg-environmental + 6 integration-on-SQLite + 1 live-nginx-environmental).
+- All tests run against PostgreSQL in Docker. No SQLite fallback.
 - No linting/formatter config (no `.eslintrc` at root, no `pyproject.toml`, no `ruff.toml`).
-- CI: `.github/workflows/django.yml` runs migrations + the unit test suite + the integration test suite (`pytest -m integration`) in separate steps. Blocks merges on failure.
-
-### Integration test marker
-
-Tests that need real Postgres + Redis (pgvector HNSW indexes, row-level locks, Redis Streams, concurrent transactions) are marked with `@pytest.mark.integration`. They are auto-skipped on the local SQLite + LocMem test environment (see `_skip_integration_without_real_services` autouse fixture in `conftest.py`) and run in CI where the workflow provisions real services.
-
-```bash
-# Run only the integration-marked tests (CI does this in a separate step)
-docker compose exec web pytest backend/app/tests/ -m integration --tb=short
-```
+- CI: `.github/workflows/django.yml` runs migrations + the test suite via Docker. Blocks merges on failure.
 
 ### Known Skipped Tests (environmental, not regressions)
 
@@ -476,6 +474,8 @@ Ask:
 
 Do not modify code merely because something looks unusual. First determine why it exists.
 
+Understand the architecture and how everything works to make sure you write code. Have a very detailed understanding of the code implimentation and be sure to discus these details with operator at very high verbosity and clarity.
+
 ---
 
 ## 4. Change Scope
@@ -622,19 +622,7 @@ The following patterns were applied across changed files (`serializers.py`, `mid
 - **`DECISION:`** — `models.py:62-65` (DB audit table over file logs); `models.py:103-105` (DB-level negative counter constraints); `models.py:145-149` (CheckConstraint migration required); `middleware.py:292-293` (DB write overhead accepted for audit); `serializers.py:240-244` (pydub over ffprobe); `services/content_moderation.py:7` (v1 sha256 + blocked phrase list, offline); `services/content_moderation.py:92-94` (sha256 fingerprint sufficient for v1); `serializers.py:124` (serializer-level file validation before model); `settings.py:172-189` (psycopg2 `options` string for timeouts); `settings.py:204-233` (read-replica activation only when `READ_DATABASE_URL` set); `settings.py:245-252` (split Redis to prevent feed-spike eviction of queued tasks); `settings.py:454-456` (STORAGES dict over deprecated STATICFILES_STORAGE); `settings.py:621-629` (env-driven regulatory contacts); `AGENTS.md` (this note).
 - **`SECURITY:`** — `serializers.py:16-21` (pure-Python magic-byte allowlist as first defense); `serializers.py:128-133` (python-magic layer-2 check); `serializers.py:178-191` (copyright acknowledgment enforcement before DB persistence); `serializers.py:236-251` (duration probe at upload time to prevent 24h WAV abuse); `serializers.py:373-376` (watch_time_ms capped at 10h to prevent viewbot inflation); `serializers.py:350-365` (comment text null-byte / control-char stripping); `middleware.py:60` (audit DB failure never breaks request); `settings.py:86-88` (token_blacklist + rotation); `settings.py:467-479` (signed S3 URLs instead of public bucket); `models.py:192-195` (user identity retention for CERT-In); `services/content_moderation.py:12-14` (blocked-phrase check against lowercase transcript); `tests/test_auth_regulatory.py:52-60` (compliance endpoint requires auth + returns JSON).
 - **`HACK:`** — `models.py:294-295` (audit endpoint uses path only, no query params, to limit PII); `middleware.py:47-48` (audit DB write in finally block may fail silently if DB down — acceptable tradeoff); `serializers.py:246-250` (reading full upload into memory for pydub; needs temp-file stream if memory pressure grows); `services/content_moderation.py:16-18` (fingerprint blocklist is module-level set, not DB/Redis — production upgrade needed); `services/content_moderation.py:167-175` (AudioClip has no `transcript_text` field; moderation skips transcript check if missing — proper integration requires task-level transcript persistence).
-- **`TODO:`** — `serializers.py:250` (temp-file stream for pydub); `services/content_moderation.py:19-20` (multilingual India-specific prohibited-content database; replace blocked phrase list); `settings.py:378-379` (remove `flush_telemetry_legacy` after one stable cycle); `services/content_moderation.py:167-175` (transcript text persistence from `process_audio_to_hls` task); `docs/INDIA-REGULATORY-READINESS.md` (public clip endpoint needs `moderation_approved` filter); `AGENTS.md` (pgvector test DB setup — see below).
-
-### Pgvector test DB limitation (Agent 3 verification)
-
-Agent 3 verified that `pgvector` extension tests (`test_integration_pgvector.py`) skip on SQLite + LocMem. To enable full integration coverage:
-
-```bash
-# Inside the running web container (or in test DB setup):
-docker compose exec web python manage.py dbshell -c "CREATE EXTENSION IF NOT EXISTS vector;"
-# Or add to conftest.py / init script for persistent test DB.
-```
-
-The 6 skipped integration tests (see `AGENTS.md` §Testing & Linting) cover `HNSW` index creation (`m=16`, `ef_construction=64`), cosine-distance queries, and concurrent vector updates. Without the extension, these skip, reducing CI confidence in recommendation pipeline correctness. **Action: add to `conftest.py` or Docker `initdb.d` script before Phase B launch.**
+- **`TODO:`** — `serializers.py:250` (temp-file stream for pydub); `services/content_moderation.py:19-20` (multilingual India-specific prohibited-content database; replace blocked phrase list); `settings.py:378-379` (remove `flush_telemetry_legacy` after one stable cycle); `services/content_moderation.py:167-175` (transcript text persistence from `process_audio_to_hls` task); `docs/INDIA-REGULATORY-READINESS.md` (public clip endpoint needs `moderation_approved` filter).
 
 ### Content Moderation Pipeline Design Note (Agent 2 / v1)
 
