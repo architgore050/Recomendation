@@ -114,3 +114,4 @@ def run_moderation_check(clip_id) -> Tuple[bool, Optional[str]]:
     clip.save(update_fields=["moderation_approved"])
     
     return approved, reason
+

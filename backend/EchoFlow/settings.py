@@ -492,8 +492,7 @@ STORAGES = {
 # SECURITY / REGULATORY: Enforce India S3 region for DPDP / RBI compliance.
 # DECISION: Runtime assertion rather than silent fallback; production must
 # explicitly set ap-south-1 (or ap-south-2) or the app fails to start.
-assert STORAGES["default"]["OPTIONS"]["region_name"] in ("ap-south-1", "ap-south-2", "auto"),     "STORAGES region must be set to ap-south-1, ap-south-2 (AWS S3 / DPDP / RBI) or "auto" (Cloudflare R2). Set AWS_S3_REGION_NAME in .env."
-
+assert STORAGES["default"]["OPTIONS"]["region_name"] in ("ap-south-1", "ap-south-2", "auto"), 'STORAGES region must be set to ap-south-1, ap-south-2 (AWS S3 / DPDP / RBI) or "auto" (Cloudflare R2). Set AWS_S3_REGION_NAME in .env.'
 # PUBLIC_MEDIA_ENDPOINT_URL: the endpoint a BROWSER can actually reach, as
 # opposed to AWS_S3_ENDPOINT_URL above (which is what containers use to talk
 # to the bucket over the Docker-internal network). These are frequently
