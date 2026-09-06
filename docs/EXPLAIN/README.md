@@ -71,11 +71,19 @@ This directory contains comprehensive, code-grounded technical documentation for
 
 ### Docker & Deployment
 - [01-multi-stage-dockerfile.md](docker/01-multi-stage-dockerfile.md) — Build stages, wheelhouse, secret handling
-- [02-docker-compose.md](docker/02-docker-compose.md) — 14 services (db, pgbouncer, redis_broker, redis_cache, minio, minio-init, nginx, web, celery, celery_feed, celery_media, celery_beat, prometheus, grafana), health checks, resource limits
+- [02-docker-compose.md](docker/02-docker-compose.md) — 14 services, health checks, resource limits
 - [03-environment-variables.md](docker/03-environment-variables.md) — Required vars, dev vs prod differences
 - [04-gunicorn-wait-for-db.md](docker/04-gunicorn-wait-for-db.md) — Preload app, post_fork connection reset, DB polling
-- [05-https-tls-termination.md](docker/05-https-tls-termination.md) — nginx TLS terminator: why, how, pros, cons, failure modes (added 2026-09-04)
-- [06-https-production-readiness.md](docker/06-https-production-readiness.md) — 12-section release checklist for HTTPS deployment (added 2026-09-04)
+- [05-https-tls-termination.md](docker/05-https-tls-termination.md) — nginx TLS terminator (added 2026-09-04)
+- [06-https-production-readiness.md](docker/06-https-production-readiness.md) — 12-section HTTPS release checklist (added 2026-09-04)
+
+### Deployment (Hybrid VPS + Laptop)
+- [DEPLOYMENT/README.md](DEPLOYMENT/README.md) — Hybrid deployment overview and quick start
+- [DEPLOYMENT/01-hybrid-deployment-overview.md](DEPLOYMENT/01-hybrid-deployment-overview.md) — Architecture, service inventory, resource usage
+- [DEPLOYMENT/02-vps-setup.md](DEPLOYMENT/02-vps-setup.md) — VPS deploy guide (Hetzner/Oracle + Cloudflare Tunnel + Tailscale)
+- [DEPLOYMENT/03-laptop-media-worker.md](DEPLOYMENT/03-laptop-media-worker.md) — Laptop media worker deploy guide
+- [DEPLOYMENT/04-cloudflare-config.md](DEPLOYMENT/04-cloudflare-config.md) — R2 bucket policy, Tunnel, Pages, DNS
+- [DEPLOYMENT/05-data-flow.md](DEPLOYMENT/05-data-flow.md) — End-to-end data flow across all components
 
 ### Observability
 - [01-current-state.md](observability/01-current-state.md) — What we measure today, where the gaps are
