@@ -1,0 +1,60 @@
+# =============================================================================
+# EchoFlow — Laptop Media Worker Compose
+#
+# Runs ONLY the heavy media worker (celery_media) on the laptop.
+# Connects to VPS services (PostgreSQL, Redis, R2) via Tailscale private network.
+#
+# Prerequisites:
+#   1. Tailscale subnet router running on VPS (172.28.0.0/16 advertised)
+#   2. .env copied from .env.laptop.example with real values
+#   3. Media image built: docker build --target media -t echoflow-media:local --secret id=hf_token,env=HF_TOKEN .
+#
+# Usage:
+#   docker compose -f docker-compose.laptop.yml up -d
+# =============================================================================
+
+services:
+  celery_media:
+    image: echoflow-media:${TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: media
+    restart: unless-stopped
+    command: >
+      sh -c "set -e && python wait_for_db.py &&
+              celery -A backend.EchoFlow worker -Q heavy_media --pool=prefork --concurrency=2 --loglevel=info"
+    env_file:
+      - .env
+    volumes:
+      - laptop-scratch:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_BROKER_URL=${REDIS_BROKER_URL}
+      - REDIS_CACHE_URL=${REDIS_CACHE_URL}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.echo-flow.in}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-echoflow-media}
+      - AWS_S3_ENDPOINT_URL=${AWS_S3_ENDPOINT_URL}
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-auto}
+      - AWS_S3_QUERYSTRING_EXPIRE=${AWS_S3_QUERYSTRING_EXPIRE:-3600}
+      - PUBLIC_MEDIA_ENDPOINT_URL=${PUBLIC_MEDIA_ENDPOINT_URL:-https://media.echo-flow.in}
+      - HF_HOME=/home/appuser/.cache/huggingface
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - SENTRY_ENV=${SENTRY_ENy:-production}
+
+volumes:
+  laptop-scratch:
