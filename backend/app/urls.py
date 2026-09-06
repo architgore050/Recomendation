@@ -10,8 +10,8 @@ from .views import (
     AudioUploadViewSet, FastFeedViewSet, ClipInteractionViewSet,
     ShareViewSet, CommentViewSet, FollowViewSet,
     TagsViewSet, SuggestionViewSet, RegisterView, ProfileViewSet,
-    GrievanceCreateView, DataSubjectAccessView, DataSubjectErasureView, ComplianceContactView,
-    TakedownRequestView
+    GrievanceCreateView, DataSubjectAccessView, DataSubjectErasureView,
+    ComplianceContactView, TakedownRequestView, PlaybackTokenView
 )
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework.throttling import ScopedRateThrottle
@@ -67,6 +67,7 @@ urlpatterns = [
     path('grievance/', GrievanceCreateView.as_view(), name='grievance_create'),
     path('data-subject/access/', DataSubjectAccessView.as_view(), name='data_subject_access'),
     path('data-subject/erasure/', DataSubjectErasureView.as_view(), name='data_subject_erasure'),
+    path('media/playback-token/<uuid:clip_id>/', PlaybackTokenView.as_view(), name='playback_token'),
     # NOTE: no /media/ route anymore, on purpose. Media now lives in S3-
     # compatible object storage (see settings.STORAGES["default"]), not on
     # this container's disk — there is nothing local left to serve, and a

@@ -16,11 +16,12 @@ This document explains how to set up the VPS half of the hybrid deployment.
 
 1. In the Cloudflare dashboard, go to **R2** → **Create bucket**.
 2. Name: `echoflow-media`
-3. Create an **API Token** with `Object Read & Write` permissions scoped
-   to this bucket.
-4. Set the **bucket policy** so `hls/*` is `public-read` but `uploads/*`
-   stays private (prevents unauthorized access to original uploads while
-   allowing HLS playback).
+3. Create an **API token** with `Object Read & Write` permissions scoped
+    to this bucket.
+4. R2 bucket starts fully private by default. Do **not** add a public-read
+    policy for `hls/*` — HLS token protection is handled by the Cloudflare
+    Worker (see `docs/EXPLAIN/storage/04-hls-token-protection.md`,
+    "Option A — Cloudflare Worker").
 
 ## Step 2: Cloudflare Tunnel Setup
 

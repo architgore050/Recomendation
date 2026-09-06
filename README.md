@@ -252,7 +252,7 @@ Two stacks are available after `docker compose up`:
 The stdlib-based `scripts/observability_tui.py` is still available for quick spot-checks when no browser is handy.
 
 ## Testing
-**Current count: 230 passed, 9 skipped, 0 failed** (9 skipped = 2 ffmpeg-environmental + 6 integration-on-SQLite + 1 live-nginx-environmental).
+**Current count: 275 passed, 6 skipped, 0 failed** (6 skipped = 1 ffmpeg-environmental + 5 nginx-environmental).
 
 The test suite lives under `backend/app/tests/` (22 files) and uses `pytest` + `pytest-django`. Run via `docker compose exec web pytest …`. See [AGENTS.md](AGENTS.md) → "Running Tests" for the full command set.
 

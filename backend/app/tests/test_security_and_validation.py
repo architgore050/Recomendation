@@ -26,6 +26,8 @@ class TestRegister:
             'username': 'newuser',
             'email': 'new@example.com',
             'password': 'secure-pwd-1234',
+            'consent_accepted': True,
+            'terms_version': 'v1.0',
         }, format='json')
         assert r.status_code == 201, r.data
 

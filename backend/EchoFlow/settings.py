@@ -506,6 +506,18 @@ assert STORAGES["default"]["OPTIONS"]["region_name"] in ("ap-south-1", "ap-south
 # In prod against real S3 these are typically identical (or you leave
 # PUBLIC_MEDIA_ENDPOINT_URL unset and it falls back to AWS_S3_ENDPOINT_URL).
 PUBLIC_MEDIA_ENDPOINT_URL = os.getenv("PUBLIC_MEDIA_ENDPOINT_URL") or os.getenv("AWS_S3_ENDPOINT_URL") or None
+
+# HLS token protection settings (see docs/EXPLAIN/storage/04-hls-token-protection.md)
+# MEDIA_TOKEN_SECRET: HMAC signing key shared between Django (token issuance)
+#   and the Cloudflare Worker / nginx njs (token validation). Must be identical
+#   or all HLS playback returns 403.
+# MEDIA_TOKEN_TTL_SECONDS: token lifetime in seconds (default 600 = 10 min).
+# MEDIA_TOKEN_COOKIE_DOMAIN: cookie Domain attribute. Leave empty for dev
+#   (localhost does not support domain cookies). Set to parent domain (e.g.
+#   ".echo-flow.in") in prod for cross-subdomain cookie sharing.
+MEDIA_TOKEN_SECRET = os.getenv("MEDIA_TOKEN_SECRET", "")
+MEDIA_TOKEN_TTL_SECONDS = int(os.getenv("MEDIA_TOKEN_TTL_SECONDS", "600"))
+MEDIA_TOKEN_COOKIE_DOMAIN = os.getenv("MEDIA_TOKEN_COOKIE_DOMAIN", "")
 AUTH_USER_MODEL = 'app.User' # for Custom user model
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

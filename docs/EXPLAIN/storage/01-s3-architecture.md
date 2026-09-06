@@ -115,9 +115,12 @@ master.m3u8 (signed)
 **Result:** Signed `master.m3u8` works, but every segment request gets **403 Forbidden** (no signature).
 
 ### Industry Standard Solution
-- **Derived/processed content** (HLS) = public-read
+- **Derived/processed content** (HLS) = private + token-gated (signed cookies)
 - **Original uploads** = private, signed URLs
 - Used by Netflix, Spotify, YouTube, etc.
+- EchoFlow's current implementation uses public-read for `hls/` (see
+  `03-bucket-policies.md`). The plan to migrate to signed-cookie token
+  protection is documented in `04-hls-token-protection.md`.
 
 ---
 

@@ -13,10 +13,11 @@ class TestConsentAudit:
         assert ConsentAudit is not None
 
     def test_user_has_dob_and_computed_is_minor(self):
+        from datetime import date
         from backend.app.models import User
-        user = User.objects.create_user(username='testminor', email='minor@test.com', password='testpass', dob='2010-01-01')
+        user = User.objects.create_user(username='testminor', email='minor@test.com', password='testpass', dob=date(2010, 1, 1))
         assert user.computed_is_minor is True
-        user.dob = '2000-01-01'
+        user.dob = date(2000, 1, 1)
         user.save()
         assert user.computed_is_minor is False
 

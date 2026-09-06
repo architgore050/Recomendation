@@ -99,12 +99,20 @@ echoflow-media/
 
 ## ACL Summary
 
-| Prefix | ACL | Anonymous Policy | Access Method |
-|--------|-----|------------------|---------------|
-| `uploads/` | Private | None | Signed URL |
-| `audio_scraper/` | Private | None | Signed URL |
-| `hls/` | Private + **Anonymous Download** | `Allow GetObject on hls/*` | **Unsigned URL** |
-| `avatars/` | Private | None | Signed URL |
+| Prefix | ACL | Anonymous Policy | Access Method | Notes |
+|--------|-----|------------------|---------------|-------|
+| `uploads/` | Private | None | Signed URL (`get_signed_media_url`) | Original uploads — always private |
+| `audio_scraper/` | Private | None | Signed URL | Scraper originals — licensing compliance |
+| `hls/` | Private + token-gated | None (was anonymous download) | **Signed cookie** via Worker/nginx | See `04-hls-token-protection.md` for migration plan |
+| `avatars/` | Private | None | Signed URL | User PII |
+
+> **Migration note:** The `hls/` prefix was previously public-read via
+> `mc anonymous set download local/.../hls`. When HLS token protection
+> ships (Option A for production, Option B for dev), this public-read policy
+> is **removed** and replaced with per-request cookie validation at the
+> Cloudflare Worker (production) or nginx njs (development) layer. See
+> `04-hls-token-protection.md` for the full implementation plan and rollback
+> strategy.
 
 ---
 

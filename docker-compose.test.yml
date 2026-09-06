@@ -30,6 +30,12 @@ services:
     volumes:
       - test_postgres_data:/var/lib/postgresql/data
       - ./docker/test/postgres-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "exec pg_isready -U ${DB_USER:-echoflow} -d ${DB_NAME:-echoflow_test}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   # Test Redis broker — noeviction, 512MB.
   redis_broker:
@@ -39,6 +45,12 @@ services:
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
     volumes:
       - test_redis_broker_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   # Test Redis cache — allkeys-lru, 1GB.
   redis_cache:
@@ -48,6 +60,12 @@ services:
     command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
     volumes:
       - test_redis_cache_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   # Test MinIO — S3-compatible object storage.
   minio:
@@ -65,6 +83,12 @@ services:
       MINIO_CORS_MAX_AGE: "3600"
     volumes:
       - test_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   # One-shot: creates the bucket on startup.
   minio-init:
@@ -82,7 +106,7 @@ services:
   # Test runner — Django web container with tests.
   # Uses the same image as production but runs pytest instead of gunicorn.
   web:
-    image: devansh1012007/echoflow-api:latest
+    image: devansh1012007/echoflow-api:test
     build:
       context: .
       dockerfile: Dockerfile

@@ -1,6 +1,6 @@
 ﻿import { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
 import { AudioClip, PlayerState } from '../types';
-import { interactionsAPI } from '../api/client';
+import { interactionsAPI, mediaAPI } from '../api/client';
 import Hls from 'hls.js';
 
 const PlayerContext = createContext<PlayerState | null>(null);
@@ -41,7 +41,7 @@ export function PlayerProvider({ children }: Props) {
     return () => { killHLS(); };
   }, [killHLS]);
 
-  const loadSource = useCallback((clip: AudioClip) => {
+  const loadSource = useCallback(async (clip: AudioClip) => {
     const a = audioRef.current;
     killHLS();
     a.pause();
@@ -51,6 +51,19 @@ export function PlayerProvider({ children }: Props) {
 
     const src = clip.hls_playlist_url;
     if (!src) { setError('No stream available'); return; }
+
+    // HLS token protection: mint a short-lived playback token cookie before
+    // loading the source. The cookie (ef_hls_token) is HttpOnly and sent
+    // automatically by the browser on all /hls/* subrequests.
+    // SECURITY: If token issuance fails, playback is blocked — we never
+    // load HLS without a valid token.
+    try {
+      await mediaAPI.getPlaybackToken(clip.id);
+    } catch {
+      setError('Playback authorization failed — please try again');
+      setPlaying(false);
+      return;
+    }
 
     const fullSrc = src.startsWith('http') ? src : (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8005') + src;
 
@@ -74,7 +87,7 @@ export function PlayerProvider({ children }: Props) {
       else { await audioRef.current.play().catch(() => {}); setPlaying(true); startRef.current = Date.now(); }
       return;
     }
-    loadSource(clip);
+    await loadSource(clip);
     setActive(clip);
   }, [active, playing, loadSource]);
 

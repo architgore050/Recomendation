@@ -16,6 +16,9 @@ Companion: backend/app/models.py (HnswIndex declarations at lines 79-99),
 backend/app/services/feed_pool.py (CosineDistance usage), and
 docs/EXPLAIN/database/05-read-replica-design.md.
 """
+import json
+import random
+
 import pytest
 
 pytestmark = pytest.mark.django_db
@@ -53,40 +56,78 @@ class TestPgVectorHnswIndex:
         )
 
     def test_cosine_distance_query_uses_index(self):
-        # Run EXPLAIN on a cosine-distance query against semantic_vector.
-        # The plan must include `semantic_vector_index` for the HNSW
-        # operator to fire; a sequential scan means the index is missing,
-        # wrong opclass, or the query is malformed.
-        from django.db import connection
+        # Verify that:
+        # 1. The HNSW index on semantic_vector is of type `hnsw` (not a
+        #    fallback btree/ivfflat).
+        # 2. With seq scan disabled, the EXPLAIN plan references the index.
+        #
+        # DECISION: We use `SET LOCAL` inside an explicit transaction.atomic()
+        # block (rather than relying solely on django_db(transaction=True)'s
+        # outer transaction) to guarantee a transaction is active when
+        # `SET LOCAL` runs. Without an active transaction, Postgres silently
+        # ignores `SET LOCAL`. We also insert 1 000 rows with diverse random
+        # vectors so the planner sees enough data to benefit from the index.
+        from django.db import connection, transaction
         from pgvector.django import CosineDistance
 
         from backend.app.models import AudioClip
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
 
-        # Build a dummy query vector. Any 384-dim vector works for EXPLAIN;
-        # we don't need real data.
+        creator = User.objects.create_user(
+            username='creator-explain', email='ce@example.com', password='x'
+        )
+        random.seed(42)
+        for i in range(1000):
+            vec = [random.uniform(-1, 1) for _ in range(384)]
+            AudioClip.objects.create(
+                title=f'clip-{i}',
+                category='music',
+                creator=creator,
+                status='ready',
+                duration_ms=60_000,
+                likes=0, shares=0, skips=0, comment_count=0,
+                semantic_vector=vec,
+                acoustic_vector=[0.0] * 128,
+            )
+
         query_vec = [0.1] * 384
 
-        qs = (
-            AudioClip.objects
-            .annotate(distance=CosineDistance('semantic_vector', query_vec))
-            .order_by('distance')[:10]
-        )
-        sql, params = qs.query.sql_with_params()
-        explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                # Verify the index uses the `hnsw` access method
+                cursor.execute("""
+                    SELECT am.amname
+                    FROM pg_index i
+                    JOIN pg_class c ON c.oid = i.indexrelid
+                    JOIN pg_am am ON am.oid = c.relam
+                    WHERE c.relname = 'semantic_vector_index'
+                """)
+                amname = cursor.fetchone()
+                assert amname and amname[0] == 'hnsw', (
+                    f"Index `semantic_vector_index` is not HNSW (got: {amname}). "
+                    "Check AudioClip.Meta.indexes in backend/app/models.py."
+                )
 
-        with connection.cursor() as cursor:
-            cursor.execute(explain_sql, params)
-            plan_json = cursor.fetchone()[0]
+                # Now verify the EXPLAIN plan uses the index when seq scan
+                # is disabled. SET LOCAL requires an active transaction.
+                cursor.execute("SET LOCAL enable_seqscan = OFF")
+                qs = (
+                    AudioClip.objects
+                    .annotate(distance=CosineDistance('semantic_vector', query_vec))
+                    .order_by('distance')[:10]
+                )
+                sql, params = qs.query.sql_with_params()
+                cursor.execute(f"EXPLAIN (FORMAT JSON) {sql}", params)
+                plan_json = cursor.fetchone()[0]
 
-        # The plan is a JSON array; we serialize and grep for the index name.
-        # This is robust against plan-shape changes (e.g., adding a Sort node).
-        import json
-        plan_str = json.dumps(plan_json)
-        assert 'semantic_vector_index' in plan_str or 'hnsw' in plan_str.lower(), (
-            f"EXPLAIN did not reference the HNSW index. Plan: {plan_str}\n"
-            "Possible causes: index was dropped, opclass mismatch, "
-            "or the query bypasses the index."
-        )
+            # The plan is a JSON array; check for the index name or 'hnsw'.
+            plan_str = json.dumps(plan_json)
+            assert 'semantic_vector_index' in plan_str or 'hnsw' in plan_str.lower(), (
+                f"EXPLAIN did not reference the HNSW index. Plan: {plan_str[:500]}\n"
+                "Possible causes: index was dropped, opclass mismatch, "
+                "or the query bypasses the index."
+            )
 
     def test_vector_query_returns_correct_top_k(self):
         # Insert N clips with known vectors; query for the nearest; assert

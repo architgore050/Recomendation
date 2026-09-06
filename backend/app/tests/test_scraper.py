@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 from django.test import TestCase
@@ -11,13 +12,10 @@ from pydub.generators import Sine
 from pydub import AudioSegment
 
 
-# The two tests below require the `ffmpeg` binary on PATH. The dev
-# environment (Linux host, no Docker) does not have ffmpeg installed;
-# only the Docker image does. These tests are KNOWN to fail in this
-# environment and are explicitly skipped — they are NOT silently
-# broken. See AGENTS.md "Testing & Linting" for the canonical
-# list of pre-existing known failures and how to enable ffmpeg
-# locally to re-enable them.
+# Check if ffmpeg is available. In Docker it's installed in the `base`
+# stage; in bare-metal dev it may be missing. Use a conditional skip so
+# the tests run when ffmpeg IS present (i.e., in Docker CI).
+_ffmpeg_available = shutil.which('ffmpeg') is not None
 
 
 class ScraperUnitTests(TestCase):
@@ -31,10 +29,7 @@ class ScraperUnitTests(TestCase):
         seg.export(tmp.name, format='wav')
         return tmp.name
 
-    @unittest.skip(
-        "Requires ffmpeg on PATH (Docker-only); dev env has no ffmpeg. "
-        "See AGENTS.md 'Testing & Linting' for the env requirement."
-    )
+    @unittest.skipUnless(_ffmpeg_available, "Requires ffmpeg on PATH (installed in Docker image)")
     def test_normalizer_trims_to_max_seconds(self):
         inp = self._make_sample_wav(duration_ms=5000)
         out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3').name
@@ -49,10 +44,7 @@ class ScraperUnitTests(TestCase):
                 except Exception:
                     pass
 
-    @unittest.skip(
-        "Requires ffmpeg on PATH (Docker-only); dev env has no ffmpeg. "
-        "See AGENTS.md 'Testing & Linting' for the env requirement."
-    )
+    @unittest.skipUnless(_ffmpeg_available, "Requires ffmpeg on PATH (installed in Docker image)")
     def test_uploader_creates_audioclip(self):
         inp = self._make_sample_wav(duration_ms=1000)
         out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3').name
@@ -70,8 +62,9 @@ class ScraperUnitTests(TestCase):
             )
             self.assertIsNotNone(clip.id)
             self.assertTrue(clip.original_file.name.startswith('audio_scraper/'))
-            # ensure file exists on disk
-            self.assertTrue(os.path.exists(clip.original_file.path))
+            # ensure file was stored (works with local or S3/MinIO backends)
+            from django.core.files.storage import default_storage
+            self.assertTrue(default_storage.exists(clip.original_file.name))
         finally:
             for p in (inp, out):
                 try:

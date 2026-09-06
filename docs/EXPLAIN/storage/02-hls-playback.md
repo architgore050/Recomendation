@@ -219,21 +219,30 @@ def get_clip_hls_url(self, obj):
 
 ## Future: Token Auth for HLS (If Needed)
 
-### CloudFront Signed Cookies
-```python
-# Lambda@Edge or CloudFront Functions
-# Validate JWT → set signed cookie for hls/* prefix
-```
+> **Status: PLANNED.** See `04-hls-token-protection.md` for the full design and
+> implementation plan. This section is retained as a historical record of the
+> evolution from "public HLS" to "token-gated HLS".
 
-### S3 Presigned POST (Upload Only)
-```python
-# Not for playback — uploads only
-```
+### Cloudflare Worker + Signed Cookies (Production)
 
-### Signed URL with Short TTL + Refresh
-```python
-# Not viable — relative reference problem
-```
+The recommended approach for token-protected HLS over Cloudflare R2:
+
+1. R2 bucket `hls/` prefix becomes **private** (remove public-read bucket policy)
+2. A [Cloudflare Worker](https://developers.cloudflare.com/workers/) at `media.echo-flow.in`
+   validates an HMAC-signed cookie on every `/hls/*` request
+3. If valid → Worker proxies to R2 via the Workers R2 binding (`env.HLS_BUCKET.get(key, {range: request.headers})`)
+4. If invalid → 403
+
+The cookie is set by a Django API endpoint
+(`GET /api/v1/media/playback-token/<clip_id>/`) and is automatically sent by
+the browser on all HLS subrequests (master.m3u8, variant playlists, segments)
+because cookies are not stripped by RFC 3986 relative-reference resolution.
+
+Worker-free alternative (Pro plan+): Cloudflare WAF `is_timed_hmac_valid_v0()`
+can validate a query-string token, but this requires the token to be present on
+every subrequest URL — which hls.js achieves via `xhrSetup` to inject the token
+into each manifest and segment request. The signed-cookie approach is simpler
+and requires no hls.js configuration changes.
 
 ---
 

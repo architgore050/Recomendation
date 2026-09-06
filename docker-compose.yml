@@ -224,9 +224,13 @@ services:
     entrypoint: >
       sh -c "
         mc alias set local http://minio:9000 ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required} ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required} &&
-        mc mb --ignore-existing local/${AWS_STORAGE_BUCKET_NAME:-echoflow-media} &&
-        mc anonymous set download local/${AWS_STORAGE_BUCKET_NAME:-echoflow-media}/hls
-      "
+         mc mb --ignore-existing local/${AWS_STORAGE_BUCKET_NAME:-echoflow-media}
+         # NOTE: hls/ is intentionally NOT made public (mc anonymous set download
+         # is omitted). HLS token protection is handled by the Cloudflare Worker
+         # (production, see docs/EXPLAIN/storage/04-hls-token-protection.md) or
+         # nginx njs (dev, see Option B in the same doc). The hls/ prefix
+         # stays private; token validation happens before proxy_pass to MinIO.
+       "
     # DIAGNOSIS: HLS is a multi-file protocol — master.m3u8 references variant
     # playlists and those reference segment files, all via RELATIVE paths.
     # A presigned URL's signature is a query string, and per RFC 3986,
@@ -236,6 +240,14 @@ services:
     # signature at all — a 403 against a private bucket. One signed URL
     # cannot authorize a stream made of dozens of objects.
     #
+    # HLS TOKEN PROTECTION: The fix is signed COOKIES, not signed URLs.
+    # A cookie scoped to Path=/hls/ is sent by the browser on ALL subrequests
+    # (master.m3u8, variants, segments) without RFC 3986 query-string stripping.
+    # The cookie is issued by Django (GET /api/v1/media/playback-token/<clip_id>/)
+    # and validated by:
+    #   - Cloudflare Worker (production): workers/hls-token-worker/
+    #   - nginx njs module (dev): docker/nginx/hls_auth.js
+    # See docs/EXPLAIN/storage/04-hls-token-protection.md for full design.
     # The fix used everywhere in real HLS-over-S3 deployments (Netflix,
     # Spotify, etc., minus the CDN): the RENDERED stream is public-read; the
     # ORIGINAL uploaded file — the one thing actually worth protecting —
@@ -578,12 +590,25 @@ services:
   # blocks). Internal hops — gunicorn→nginx, nginx→minio — stay on plain
   # HTTP over the docker network; TLS is terminated once at the edge.
   #
+  # HLS TOKEN PROTECTION (dev parity): In production, HLS token validation
+  # happens at the Cloudflare Worker edge (media.echo-flow.in → Worker → R2).
+  # In dev, the :9443 nginx server block validates HLS tokens via the njs
+  # module (docker/nginx/hls_auth.js) before proxying to MinIO. Both layers
+  # validate the same ef_hls_token HMAC cookie issued by Django.
+  # See docs/EXPLAIN/storage/04-hls-token-protection.md for design.
+  #
   # The cert + key are bind-mounted from ./docker/certs/ (self-signed for
   # dev; replace with Let's Encrypt fullchain + privkey in prod). No cert
   # material enters the application image, so renewal never requires a
   # web-container rebuild.
   nginx:
     image: nginx:1.27-alpine
+    # DECISION: Install nginx-mod-njs for HLS token cookie validation (dev
+    # parity with the Cloudflare Worker). In dev only, the :9443 server block
+    # uses js_access to validate the ef_hls_token cookie before proxying to
+    # MinIO. Production uses the Cloudflare Worker instead.
+    # NOTE: This line is applied via docker-compose override or image rebuild;
+    # see docs/EXPLAIN/storage/04-hls-token-protection.md#option-b--nginx--njs-development
     container_name: echoflow_nginx
     restart: unless-stopped
     depends_on:
@@ -598,6 +623,8 @@ services:
     volumes:
       - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./docker/certs:/etc/nginx/certs:ro
+      # njs script for HLS token cookie validation (dev parity with Worker)
+      - ./docker/nginx/hls_auth.js:/etc/nginx/hls_auth.js:ro
     healthcheck:
       # wget is shipped in nginx:alpine; -q silences the success path,
       # --spider does a HEAD so we don't transfer a body. The 301-to-HTTPS
