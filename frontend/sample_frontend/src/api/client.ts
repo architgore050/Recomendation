@@ -157,6 +157,21 @@ export const profileAPI = {
   updateProfile: (fd: FormData) => api('/profile/me/update/', { method: 'PATCH', body: fd }),
 };
 
+// --- Media ---
+// SECURITY: The ef_hls_token cookie is HttpOnly — JavaScript cannot read it.
+// The browser auto-sends it on all /hls/* requests to the media endpoint.
+export const mediaAPI = {
+  getPlaybackToken: (clipId: string): Promise<{ status: string }> =>
+    fetch(`${API_BASE}/media/playback-token/${clipId}/`, {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + (getAccessToken() || '') },
+      credentials: 'include',  // Required for Set-Cookie to set the token
+    }).then(res => {
+      if (!res.ok) throw { status: res.status, message: 'Token issuance failed' };
+      return res.json();
+    }),
+};
+
 // --- Tags ---
 export const tagsAPI = {
   initialize: (tags: string[]) => api('/tags/initialize/', { method: 'POST', body: JSON.stringify({ selected_tags: tags }) }),

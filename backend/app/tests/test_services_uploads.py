@@ -20,13 +20,13 @@ class TestFinalizeUpload:
     def test_enqueues_process_audio_to_hls_on_commit(self, ready_clip, settings, monkeypatch):
         from django.test import TestCase
         from backend.app.services import uploads as uploads_svc
+        from backend.app.services import task_publisher
 
         # Patch the publisher BEFORE the view/service code runs. The
-        # patch is on the module attribute that uploads_svc.finalize_upload
+        # patch is on the module attribute that uploads_svc.trigger_hls_processing
         # looks up at call time (it imports `from .task_publisher import publish`
         # so the binding is the local name; we monkeypatch the module
         # so the local import resolves to our mock).
-        from backend.app.services import task_publisher
         recorded = []
         monkeypatch.setattr(
             task_publisher, 'publish',
@@ -36,8 +36,11 @@ class TestFinalizeUpload:
         # rebind the local name to the patched function.
         monkeypatch.setattr(uploads_svc, 'publish', task_publisher.publish)
 
+        ready_clip.moderation_approved = True
+        ready_clip.save(update_fields=['moderation_approved'])
+
         with TestCase.captureOnCommitCallbacks(execute=True):
-            uploads_svc.finalize_upload(ready_clip)
+            uploads_svc.trigger_hls_processing(ready_clip)
 
         assert len(recorded) == 1
         task_name, args, kwargs = recorded[0]

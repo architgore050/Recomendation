@@ -20,6 +20,7 @@ lock behavior at the ORM layer.
 import threading
 
 import pytest
+from django.db.models import F
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -44,8 +45,14 @@ class TestConcurrentWrites:
         def worker():
             try:
                 for _ in range(increments_per_thread):
+                    # DECISION: Use F() expression for atomic increment.
+                    # The previous read-modify-write (likes = current + 1)
+                    # caused lost updates under concurrent threads because
+                    # the SELECT and UPDATE were separate statements.
+                    # F() pushes the increment into the database layer where
+                    # row-level locks serialize correctly.
                     AudioClip.objects.filter(pk=ready_clip.pk).update(
-                        likes=AudioClip.objects.values('likes')[0]['likes'] + 1
+                        likes=F('likes') + 1
                     )
             except Exception as exc:
                 errors.append(exc)

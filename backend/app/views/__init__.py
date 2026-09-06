@@ -23,6 +23,7 @@ from .feed import FastFeedViewSet, SuggestionViewSet, TagsViewSet
 from .interactions import ClipInteractionViewSet
 from .profile import ProfileViewSet
 from .social import FollowViewSet, ShareViewSet
+from .media import PlaybackTokenView
 
 __all__ = [
     'AudioUploadViewSet',
@@ -35,6 +36,7 @@ __all__ = [
     'SuggestionViewSet',
     'RegisterView',
     'ProfileViewSet',
+    'PlaybackTokenView',
     'ComplianceContactView',
     'GrievanceCreateView',
     'DataSubjectAccessView',

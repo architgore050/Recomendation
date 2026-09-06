@@ -1,5 +1,6 @@
 import os
 from rest_framework import serializers
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Exists, OuterRef
 from .media_urls import get_hls_playback_url, get_signed_media_url

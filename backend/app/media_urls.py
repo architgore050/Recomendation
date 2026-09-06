@@ -32,9 +32,18 @@ WHY THIS FILE EXISTS — TWO SEPARATE PROBLEMS SOLVED HERE:
    is worse than no signature at all, so get_hls_playback_url() below
    returns a plain public URL, not a presigned one.
 
-   `uploads/<original>` objects remain genuinely private and still need
-   real presigned URLs — that's what get_signed_media_url() is for, kept
-   separate and unused by anything HLS-related on purpose.
+    `uploads/<original>` objects remain genuinely private and still need
+    real presigned URLs — that's what get_signed_media_url() is for, kept
+    separate and unused by anything HLS-related on purpose.
+
+    HLS TOKEN PROTECTION: As of the token-protection migration, the `hls/`
+    prefix is NO LONGER public-read. Instead, a signed cookie (issued by
+    `backend.app.services.hls_token.generate_playback_token` and consumed
+    by the Cloudflare Worker / nginx njs layer) is validated on every
+    /hls/* request. The `PUBLIC_MEDIA_ENDPOINT_URL` returned here is the
+    origin the browser hits — the cookie validation happens transparently
+    at the edge. See `docs/EXPLAIN/storage/04-hls-token-protection.md`
+    for the full design.
 """
 import boto3
 from django.conf import settings

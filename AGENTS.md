@@ -254,6 +254,9 @@ Uses Docker Compose V2 (`docker compose`, not `docker-compose`). If you have `do
 | `DJANGO_ALLOWED_HOSTS` | Comma-separated allowed hosts. Must include every host the nginx terminator is reached at (`localhost`, your prod hostname, any Tailscale/CNAMES). Default: `localhost`. |
 | `DJANGO_CORS_ALLOWED_ORIGINS` | Comma-separated **https://** origins. Every browser-reachable origin MUST be `https://` once the terminator is live — `http://` here causes mixed-content / CORS preflight failures. |
 | `PUBLIC_MEDIA_ENDPOINT_URL` | Browser-facing MinIO origin for HLS playback. **Must be `https://`** (e.g. `https://localhost:9443` in dev). `AWS_S3_ENDPOINT_URL` (containers' in-network URL) stays `http://minio:9000`. |
+| `MEDIA_TOKEN_SECRET` | HMAC signing key for HLS playback tokens. Shared between Django (issuance) and the Cloudflare Worker or nginx njs (validation). Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Must match the Worker secret set via `npx wrangler secret put MEDIA_TOKEN_SECRET`. See `docs/EXPLAIN/storage/04-hls-token-protection.md`. |
+| `MEDIA_TOKEN_TTL_SECONDS` | HLS token time-to-live in seconds. Default `600` (10 min). |
+| `MEDIA_TOKEN_COOKIE_DOMAIN` | Cookie `Domain` attribute for the HLS token cookie. Set to parent domain (e.g. `.echo-flow.in`) for cross-subdomain cookies in production. Leave empty for dev (`localhost`). |
 | `SENTRY_DSN` | Optional. When set, the `sentry-sdk` in each process captures uncaught exceptions. Get a DSN from sentry.io (free tier works). |
 | `SENTRY_ENV` | Sentry environment tag (e.g. `production`, `staging`). Default: `production`. |
 | `SENTRY_TRACES_SAMPLE_RATE` | Fraction of requests traced (0.0-1.0). Default: `0.1`. Lower for high-traffic. |
@@ -351,16 +354,25 @@ Uses HLS.js for playback. This is an example client — the production frontend 
 - No linting/formatter config (no `.eslintrc` at root, no `pyproject.toml`, no `ruff.toml`).
 - CI: `.github/workflows/django.yml` runs migrations + the test suite via Docker. Blocks merges on failure.
 
-### Known Skipped Tests (environmental, not regressions)
+### Known Skipped / Disabled Tests (environmental, not regressions)
 
-The following tests are **explicitly skipped** with `@unittest.skip(...)` because they require system binaries that are not present on the dev machine (only inside the Docker image). They are NOT broken and should NOT be "fixed" by removing the skip — the failure mode is environmental, not a code bug.
+The following tests are **conditionally skipped** with `@unittest.skipUnless(_ffmpeg_available, ...)` because they require `ffmpeg` on `PATH`. The `api` Docker image already installs ffmpeg (in the `base` stage of the Dockerfile), so these tests **pass in Docker**. If running on a bare-metal dev machine without ffmpeg, they will be skipped:
 
 | Test | Reason | How to enable locally |
 |------|--------|------------------------|
 | `backend/app/tests/test_scraper.py::ScraperUnitTests::test_normalizer_trims_to_max_seconds` | Requires `ffmpeg` on `PATH` (used by `pydub` for MP3 export) | `sudo apt install ffmpeg` (Debian/Ubuntu/Pop!_OS) or `brew install ffmpeg` (macOS) |
 | `backend/app/tests/test_scraper.py::ScraperUnitTests::test_uploader_creates_audioclip` | Same — `ffmpeg` required for `normalizer.normalize_and_trim` | Same as above |
 
-The skips carry inline reasons and a pointer back to this section. If you add a test that needs a system binary not present in `docker/base`, follow the same pattern: `@unittest.skip("requires <binary> on PATH; see AGENTS.md")`.
+The following nginx HTTPS termination tests require the `nginx` container (not part of the test stack):
+
+| Test | Reason |
+|------|--------|
+| `backend/app/tests/test_https_termination.py::TestNginxConfig::test_nginx_parses_with_no_errors` | Requires `nginx` on `PATH` (only in the full Docker stack) |
+| `backend/app/tests/test_https_termination.py::TestLiveNginxTerminator::*` | Live HTTP/HTTPS requests against nginx (not in test stack) |
+
+These use `@unittest.skip(...)` for nginx (binary not available) and the full `docker compose up` stack for the live terminator tests. They pass when running the full stack.
+
+If you add a test that needs a system binary not present in the Docker image, follow the same pattern: `@unittest.skip("requires <binary> on PATH; see AGENTS.md")`.
 
 **Do NOT** comment-out or remove tests that fail for reasons you don't understand. If a test fails and the cause is unclear, debug it: run with `pytest --tb=long`, read the traceback, search the codebase for the operation being tested, and check whether the test environment matches the AGENTS.md prerequisites (Python 3.11, Postgres 16, Redis 7, FFmpeg on `PATH`, `docker compose` running). Only after you understand WHY a test fails — and the cause is environmental, not a code bug — should you add a skip with a clear reason.
 
@@ -393,6 +405,8 @@ Keep changes minimal and additive — the file is read on every session. Don't a
 - Comment count on `AudioClip` is denormalized and updated in `Comment.save()/delete()` — not via signals.
 - `UserInteraction` uses `F()` expressions for atomic counter increments on likes/shares/skips.
 - **Self-signed dev cert (`docker/certs/localhost.crt`) is in the repo on purpose** so a fresh clone works. For prod, replace with Let's Encrypt material and `nginx -s reload` — the cert is bind-mounted, so no rebuild is needed. **Do NOT push the dev key to a public registry in any fork that re-publishes the image**; revocation is the only fix.
+- **HLS token cookies**: The `ef_hls_token` cookie must have `SameSite=Lax` (not `Strict`) so it's sent on top-level navigation from `app.echo-flow.in` to `media.echo-flow.in` (SameSite=Lax permits cookies on same-site top-level navigations, but blocks cross-site). `Secure` requires HTTPS on both `api.echo-flow.in` and `media.echo-flow.in`. In dev, `Domain` attribute must be empty (localhost doesn't support domain cookies). See `docs/EXPLAIN/storage/04-hls-token-protection.md`.
+- **HLS token secret sync**: In production, `MEDIA_TOKEN_SECRET` must be **identical** in the VPS `.env` (Django issuance) and the Cloudflare Worker secret (`npx wrangler secret put MEDIA_TOKEN_SECRET`). If these diverge, all HLS playback returns 403.
 
 ## Docs
 - `docs/backend-architecture-audit.md` — production scaling analysis (S3, PgBouncer, Kafka, etc.)
@@ -405,6 +419,7 @@ Keep changes minimal and additive — the file is read on every session. Don't a
 - `docs/EXPLAIN/observability/04-prometheus-grafana-setup.md` — Prometheus + Grafana activation (A8)
 - `docs/EXPLAIN/database/05-read-replica-design.md` — read-replica design + activation playbook (A5)
 - `docs/EXPLAIN/DEPLOYMENT/` — Hybrid deployment documentation (VPS + laptop + Cloudflare R2 + Tailscale)
+- `docs/EXPLAIN/storage/04-hls-token-protection.md` — Short-lived HLS play token design (signed cookies + Cloudflare Worker / nginx njs)
 
 ## Responsible Coding & Anti-Slop Protoco
 As an autonomous coding agent, your primary directive is **sustainable, high-signal execution**. You must prioritize long-term maintainability, security, and clarity over rapid, superficial code generation. 
@@ -743,8 +758,8 @@ Current invariants include:
 * HLS output is generated in local worker scratch space
 * generated HLS files are uploaded to object storage
 * containers must not assume a shared filesystem
-* HLS playback uses the public `hls/` storage path
-* original `uploads/` remain private
+* HLS playback uses a **token-gated** `hls/` storage path (signed cookies validate at the Cloudflare Worker or nginx edge)
+* original `uploads/` remain private (signed S3 URLs)
 * browser-visible storage endpoints may differ from internal container endpoints
 * local scratch files must be cleaned up after processing
 

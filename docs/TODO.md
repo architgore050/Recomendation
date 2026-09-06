@@ -57,3 +57,35 @@ FIX BEFORE PRODUCTION
 - The unconditional static_serve route is a stopgap, not a production answer. It's single-threaded blocking I/O with no caching headers — every HLS segment request now parks a gunicorn thread for its full duration. Fine at hackathon scale. When you're ready to matter to real users, that's an nginx-in-front-of-gunicorn problem (or S3/R2 + CDN), not a Django-routes problem.
 - Frontend Fix: The frontend auth interceptor should treat any error on /auth/token/refresh/ (both 401 and 500) as a hard auth failure: immediately clear localStorage / cookies, reset client auth state, and navigate to /login.
 - docker-compose.yml always sets REDIS_URL via .env, so the fallback never triggers in your current setup. But it's the identical failure mode waiting to happen: if you ever run a worker outside this exact compose file (a one-off script, a different deploy target, a k8s pod where the env var name got typo'd) with REDIS_URL unset, it won't error —
+
+HLS TOKEN PROTECTION (short-lived play tokens)
+  - Option A (production — Cloudflare Worker):
+    - [ ] Create workers/hls-token-worker/ (wrangler.toml, src/index.ts, src/token.ts)
+    - [ ] Bind Worker to R2 bucket (HLS_BUCKET) in wrangler.toml
+    - [ ] Set MEDIA_TOKEN_SECRET as Worker secret (npx wrangler secret put)
+      (must match .env.vps example)
+    - [ ] Route media.echo-flow.in/* → Worker (Cloudflare dashboard)
+    - [ ] Remove R2 bucket policy PublicRead on hls/*
+    - [ ] Deploy + verify: anonymous HLS request → 403, token-bearing request → 200
+  - Option B (dev — nginx + njs) [deferred after Option A ships]:
+    - [ ] Install nginx-mod-njs in Dockerfile (apk add --no-cache nginx-mod-njs)
+    - [ ] Create docker/nginx/hls_auth.js (HMAC cookie validation via crypto.subtle)
+    - [ ] Add js_import + js_access to nginx :9443 /hls/ location block
+    - [ ] Mount hls_auth.js into nginx container (docker-compose.yml volumes)
+    - [ ] Already done: removed `mc anonymous set download .../hls` from minio-init
+    - [ ] Rebuild: docker compose down -v && docker compose up --build
+    - [ ] Verify: anonymous HLS → 403, token-bearing → 200
+  - Shared backend:
+    - [ ] Create backend/app/services/hls_token.py (generate + validate)
+    - [ ] Create backend/app/views/media_views.py (PlaybackTokenView)
+    - [ ] Register route in backend/app/urls.py
+    - [ ] Add MEDIA_TOKEN_SECRET / TTL / COOKIE_DOMAIN to settings.py
+    - [ ] Add env vars to .env.example + .env.vps.example
+  - Shared frontend:
+    - [ ] Add mediaAPI.getPlaybackToken() to frontend/.../api/client.ts
+    - [ ] Call getPlaybackToken() in player.tsx loadSource() before hls.loadSource
+    - [ ] Test token issuance + cookie scope in browser devtools
+  - Tests:
+    - [ ] backend/app/tests/test_hls_token.py (unit: gen/validate/edge cases)
+    - [ ] Update test_https_termination.py (hls/ no longer public)
+    - [ ] Update diagnostics/ scripts (expect 403 without token)

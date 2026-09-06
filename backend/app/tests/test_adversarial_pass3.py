@@ -681,6 +681,7 @@ class TestLoadConcurrentFeedAccess:
         """
         import threading
         from rest_framework.test import APIClient
+        from django.core.cache import cache
 
         # Create 50 users
         users = [

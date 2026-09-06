@@ -59,6 +59,12 @@ content (transcoded, shorter, and intended for streaming).
 
 ## 2. R2 Custom Domain
 
+> **Status: DEPRECATED for HLS.** When HLS token protection ships
+> (see `docs/EXPLAIN/storage/04-hls-token-protection.md`), `media.echo-flow.in`
+> will point to a **Cloudflare Worker** (not R2 directly) so that HMAC-signed
+> cookies can be validated at the edge. R2 will remain private (no public-read
+> policy on `hls/`).
+
 ### Add custom domain
 
 1. Go to **R2** → **echoflow-media** → **Custom Domains** → **Add custom domain**

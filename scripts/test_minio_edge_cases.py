@@ -132,18 +132,20 @@ def test_anonymous_policy():
     s3 = boto_client()
     if s3 is None:
         return
-    # We can't directly test anonymous via boto (it uses keys), but we can verify via HTTP no-auth
     if requests is None:
         return
     url = f"{MINIO_HOST}/{BUCKET}/hls/"
     try:
         r = requests.get(url, timeout=5, allow_redirects=False)
-        if r.status_code == 403:
-            log("FAIL", "hls/ returned 403 without auth — anonymous policy missing")
+        if r.status_code in (401, 403):
+            log("PASS", f"hls/ correctly blocked for anonymous (HTTP {r.status_code}) — token-gated per design")
+            log("INFO", "  Anonymous hls/ access now requires ef_hls_token cookie (issued via /media/playback-token/<clip_id>/)")
+            log("INFO", "  This is intentional — see docs/EXPLAIN/storage/04-hls-token-protection.md")
         elif r.status_code in (200, 404):
-            log("PASS", f"hls/ accessible anonymously (HTTP {r.status_code}) — policy likely correct")
+            log("FAIL", f"hls/ accessible anonymously (HTTP {r.status_code}) — token policy not applied")
+            log("FAIL", "  Verify the Cloudflare Worker or nginx njs is in front of R2/MinIO")
         else:
-            log("WARN", f"hls/ returned unexpected HTTP {r.status_code}")
+            log("WARN", f"hls/ returned unexpected HTTP {r.status_code} — investigate")
     except Exception as exc:
         log("FAIL", f"hls/ anonymous access exception: {exc}")
 
