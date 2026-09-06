@@ -5,26 +5,34 @@ import { MiniPlayer } from '../components/feed/MiniPlayer';
 import { NetworkBanner } from '../components/common/NetworkBanner';
 import { OnboardingModal } from '../components/feed/OnboardingModal';
 import { shareAPI } from '../api/client';
-import { isDemoMode } from '../data/feedAdapter';
+import { useNavigation } from '../context/NavigationContext';
+import { useDemoMode } from '../context/DemoModeContext';
 
 interface Props { page: string; children: React.ReactNode; }
 
 export function AppShell({ page, children }: Props) {
   const { authed } = useAuth();
+  const { go } = useNavigation();
+  const demo = useDemoMode();
 
   const [unread, setUnread] = useState(0);
   const [onboarding, setOnboarding] = useState(false);
-  const demo = isDemoMode();
 
   useEffect(() => {
+    // Router already guards with RequireAuth, but keep defensive check
     if (!authed) return;
     const poll = () => {
       if (demo) return;
-      shareAPI.getUnread().then(d => setUnread(d.unread || 0)).catch(() => {});
+      shareAPI.getUnread().then(d => {
+        // Handle both { unread } and { count } response shapes
+        const response = d as { unread?: number; count?: number };
+        const count = response.unread ?? response.count ?? 0;
+        setUnread(count);
+      }).catch(() => {});
     };
     poll();
-    const id = setInterval(poll, 30000);
-    return () => clearInterval(id);
+    const intervalId = setInterval(poll, 30000);
+    return () => clearInterval(intervalId);
   }, [authed, demo]);
 
   useEffect(() => {
@@ -33,8 +41,6 @@ export function AppShell({ page, children }: Props) {
       setOnboarding(true);
     }
   }, [authed]);
-
-  const go = (p: string) => { window.location.href = '/' + p; };
 
   return (
     <>
