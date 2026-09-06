@@ -257,7 +257,9 @@ The stdlib-based `scripts/observability_tui.py` is still available for quick spo
 ## Testing
 **Current count: 275 passed, 6 skipped, 0 failed** (6 skipped = 1 ffmpeg-environmental + 5 nginx-environmental).
 
-The test suite lives under `backend/app/tests/` (22 files) and uses `pytest` + `pytest-django`. Run via `docker compose exec web pytest …`. See [AGENTS.md](AGENTS.md) → "Running Tests" for the full command set.
+The test suite lives under `backend/app/tests/` (23 files) and uses `pytest` + `pytest-django`. Run via `docker compose exec web pytest …`. See [AGENTS.md](AGENTS.md) → "Running Tests" for the full command set.
+
+**Docker-only test stack:** All tests run against PostgreSQL in Docker — no SQLite fallback. The `conftest.py` auto-creates the `echoflow_test` database, installs pgvector on `template1`, and handles session teardown. Run the test stack: `docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d` then `docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/ --tb=short`.
 
 Integration tests that need real Postgres + Redis + S3 (pgvector HNSW indexes, row-level locks, Redis Streams, concurrent transactions) are marked with `@pytest.mark.integration`. They auto-skip on the local SQLite + LocMem test environment and run in CI where the workflow provisions real services. Run them locally: `pytest backend/app/tests/ -m integration`.
 
