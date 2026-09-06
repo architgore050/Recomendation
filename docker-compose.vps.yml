@@ -1,0 +1,386 @@
+# =============================================================================
+# EchoFlow — VPS Deployment Compose
+#
+# Slimmed-down compose for the VPS. Runs only the light services:
+#   db, redis_broker, redis_cache, web, celery, celery_feed, celery_beat, nginx
+#
+# The heavy media worker (celery_media) runs on the laptop and connects
+# via Tailscale (see docker-compose.laptop.yml).
+#
+# Key changes from docker-compose.yml:
+#   - Removed: pgbouncer, minio, minio-init, celery_media, prometheus, grafana
+#   - DATABASE_URL points directly to db:5432 (no pgbouncer)
+#   - AWS_S3_ENDPOINT_URL points to Cloudflare R2 (not MinIO)
+#   - nginx ports: only :80 and :443 (no :9443)
+#   - Custom docker network with fixed IPs for Tailscale subnet router
+# =============================================================================
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: echoflow_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      echoflow:
+        ipv4_address: 172.28.0.4
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+          pids: 500
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  redis_broker:
+    image: redis:7-alpine
+    container_name: echoflow_redis_broker
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    volumes:
+      - redis_broker_data:/data
+    networks:
+      echoflow:
+        ipv4_address: 172.28.0.2
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+          pids: 300
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  redis_cache:
+    image: redis:7-alpine
+    container_name: echoflow_redis_cache
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_cache_data:/data
+    networks:
+      echoflow:
+        ipv4_address: 172.28.0.3
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+          pids: 300
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  web:
+    image: echoflow-api:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    working_dir: /app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_BROKER_URL=${REDIS_BROKER_URL:-redis://redis_broker:6379/0}
+      - REDIS_CACHE_URL=${REDIS_CACHE_URL:-redis://redis_cache:6379/0}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-api.echo-flow.in}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-echoflow-media}
+      - AWS_S3_ENDPOINT_URL=${AWS_S3_ENDPOINT_URL}
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-auto}
+      - AWS_S3_QUERYSTRING_EXPIRE=${AWS_S3_QUERYSTRING_EXPIRE:-3600}
+      - PUBLIC_MEDIA_ENDPOINT_URL=${PUBLIC_MEDIA_ENDPOINT_URL:-https://media.echo-flow.in}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - SENTRY_ENV=${SENTRY_ENV:-production}
+      - SENTRY_TRACES_SAMPLE_RATE=${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      - SENTRY_PROFILES_SAMPLE_RATE=${SENTRY_PROFILES_SAMPLE_RATE:-0.05}
+    command: >
+      sh -c "set -e && python wait_for_db.py &&
+             python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             gunicorn -c gunicorn.conf.py backend.EchoFlow.wsgi:application"
+    volumes:
+      - .:/app
+    ports:
+      - "8005:8000"
+    networks:
+      echoflow:
+        ipv4_address: 172.28.0.10
+    depends_on:
+      db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+      redis_cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; req = urllib.request.Request('http://localhost:8000/health/', headers={'X-Forwarded-Proto': 'https'}); urllib.request.urlopen(req, timeout=4)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+          pids: 500
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  celery:
+    image: echoflow-api:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    working_dir: /app
+    user: "1000:1000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    command: >
+      sh -c "set -e && python wait_for_db.py &&
+              celery -A backend.EchoFlow worker --loglevel=info"
+    volumes:
+      - .:/app
+    networks:
+      echoflow:
+        ipv4_address: 172.28.0.11
+    depends_on:
+      db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+      redis_cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A backend.EchoFlow inspect ping -d \"celery@$$(hostname)\" --timeout=10 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_BROKER_URL=${REDIS_BROKER_URL:-redis://redis_broker:6379/0}
+      - REDIS_CACHE_URL=${REDIS_CACHE_URL:-redis://redis_cache:6379/0}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - SENTRY_ENV=${SENTRY_ENV:-production}
+      - SENTRY_TRACES_SAMPLE_RATE=${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      - SENTRY_PROFILES_SAMPLE_RATE=${SENTRY_PROFILES_SAMPLE_RATE:-0.05}
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+          pids: 300
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  celery_feed:
+    image: echoflow-api:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    command: >
+      sh -c "set -e && python wait_for_db.py &&
+              celery -A backend.EchoFlow worker -Q fast_feed --concurrency=4 --loglevel=info"
+    env_file:
+      - .env
+    networks:
+      echoflow:
+        ipv4_address: 172.28.0.12
+    depends_on:
+      db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+      redis_cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A backend.EchoFlow inspect ping -d \"celery_feed@$$(hostname)\" --timeout=10 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_BROKER_URL=${REDIS_BROKER_URL:-redis://redis_broker:6379/0}
+      - REDIS_CACHE_URL=${REDIS_CACHE_URL:-redis://redis_cache:6379/0}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - SENTRY_ENV=${SENTRY_ENV:-production}
+      - SENTRY_TRACES_SAMPLE_RATE=${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      - SENTRY_PROFILES_SAMPLE_RATE=${SENTRY_PROFILES_SAMPLE_RATE:-0.05}
+    volumes:
+      - .:/app
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+          pids: 300
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  celery_beat:
+    image: echoflow-api:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    working_dir: /app
+    user: "1000:1000"
+    command: >
+      sh -c "set -e && python wait_for_db.py &&
+              celery -A backend.EchoFlow beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
+    healthcheck:
+      disable: true
+    volumes:
+      - .:/app
+    networks:
+      echoflow:
+        ipv4_address: 172.28.0.13
+    depends_on:
+      db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+      redis_cache:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_BROKER_URL=${REDIS_BROKER_URL:-redis://redis_broker:6379/0}
+      - REDIS_CACHE_URL=${REDIS_CACHE_URL:-redis://redis_cache:6379/0}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - SENTRY_ENV=${SENTRY_ENV:-production}
+      - SENTRY_TRACES_SAMPLE_RATE=${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      - SENTRY_PROFILES_SAMPLE_RATE=${SENTRY_PROFILES_SAMPLE_RATE:-0.05}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+          pids: 200
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: echoflow_nginx
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "https://localhost/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+          pids: 100
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+networks:
+  echoflow:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  postgres_data:
+  redis_broker_data:
+  redis_cache_data:
