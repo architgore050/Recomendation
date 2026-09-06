@@ -14,6 +14,11 @@ services:
 
   # Test database — pgvector/pg16, no pgbouncer layer.
   # Tests connect directly to this container.
+  # DECISION: pgvector is installed via initdb script on startup.
+  # The script runs CREATE EXTENSION IF NOT EXISTS vector on the default
+  # `postgres` DB + `template1`, ensuring every subsequent CREATE DATABASE
+  # (including pytest-django's `echoflow_test` recreation) inherits it.
+  # This fixes the root cause of `type "vector" does not exist`.
   db:
     image: pgvector/pgvector:pg16
     container_name: echoflow_test_db
@@ -24,6 +29,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-testpassword}
     volumes:
       - test_postgres_data:/var/lib/postgresql/data
+      - ./docker/test/postgres-init:/docker-entrypoint-initdb.d
 
   # Test Redis broker — noeviction, 512MB.
   redis_broker:
@@ -87,6 +93,7 @@ services:
     env_file:
       - .env
     environment:
+      - PYTHONPATH=/app
       - DATABASE_URL=postgresql://${DB_USER:-echoflow}:${DB_PASSWORD:-testpassword}@db:5432/echoflow_test
       - REDIS_URL=redis://redis_broker:6379/1
       - REDIS_BROKER_URL=redis://redis_broker:6379/0
@@ -114,7 +121,7 @@ services:
         condition: service_completed_successfully
     # Override the default command to run pytest instead of gunicorn.
     command: >
-      sh -c "set -e && python wait_for_db.py &&
+      sh -c "set -e && export PYTHONPATH=/app && python wait_for_db.py &&
              python manage.py migrate --noinput &&
              pytest backend/app/tests/ --tb=short -v"
 
