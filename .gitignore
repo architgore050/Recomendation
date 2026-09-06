@@ -36,6 +36,9 @@ backend/media/
 .env
 .env.local
 .env.*
+!.env.example
+!.env.vps.example
+!.env.laptop.example
 
 # Logs
 *.log
