@@ -3,7 +3,7 @@
 ## Stack
 Django 5.2 / DRF 3.18 · PostgreSQL 16 + pgvector (HNSW) · Redis 7 · Celery + Celery Beat · FFmpeg (HLS) · Vite/React (frontend/) · nginx 1.27 (TLS terminator) · Prometheus + Grafana (observability) · Sentry (errors, ready-to-configure)
 
-> **Docker is the only supported way to run EchoFlow locally.** There is no bare-metal install path. The `Dockerfile` and `docker-compose.yml` provision every dependency (Postgres+pgvector, Redis, MinIO, all Celery queues, ffmpeg, Python 3.11, ML libs, nginx, Prometheus, Grafana) in a single `docker compose up --build`. Do not introduce a non-Docker runbook.
+> **Docker is the only supported way to run EchoFlow locally.** There is no bare-metal install path. The `Dockerfile` and `docker-compose.yml` provision every dependency (Postgres+pgvector, Redis, MinIO, all Celery queues, ffmpeg, Python 3.11, ML libs, nginx, Prometheus, Grafana) in a single `docker compose up --build`. For production at small scale (~$6/month), use the hybrid deployment: `docker-compose.vps.yml` on a VPS + `docker-compose.laptop.yml` on a laptop + Cloudflare R2 for object storage. See [docs/EXPLAIN/DEPLOYMENT/01-hybrid-deployment-overview.md](docs/EXPLAIN/DEPLOYMENT/01-hybrid-deployment-overview.md).
 
 ## Docker
 ```bash
@@ -52,6 +52,38 @@ docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/ --cov=backe
 # Tear down test stack
 docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
 ```
+
+### Hybrid Deployment (production at small scale)
+
+The hybrid deployment splits services across a VPS (light services) and a
+laptop (heavy media worker), with Cloudflare R2 for object storage:
+
+```bash
+# VPS: light services (8 containers)
+git checkout feat/hybrid-vps
+cp .env.vps.example .env
+# Edit .env with real values
+bash scripts/vps-deploy.sh
+
+# Laptop: heavy media worker (1 container)
+git checkout feat/hybrid-laptop
+cp .env.laptop.example .env
+# Edit .env with real values (DJANGO_SECRET_KEY must match VPS)
+bash scripts/laptop-deploy.sh
+```
+
+- `docker-compose.vps.yml` — slimmed 8-service compose (removes pgbouncer,
+  minio, celery_media, prometheus, grafana)
+- `docker-compose.laptop.yml` — single-service compose (celery_media only)
+- `scripts/vps-deploy.sh` — one-shot VPS deploy (build, migrate, collectstatic,
+  Tailscale setup, daily backup cron)
+- `scripts/laptop-deploy.sh` — one-shot laptop deploy (build media image,
+  start worker, start heartbeat)
+- `scripts/laptop-heartbeat.sh` — background heartbeat writer to Redis
+- `backend/app/views/system_health.py` — `/api/v1/health/media-worker/`
+  endpoint reporting laptop worker liveness
+
+See [docs/EXPLAIN/DEPLOYMENT/](docs/EXPLAIN/DEPLOYMENT/) for full setup guides.
 
 ### Production stack + tests (when you need nginx/MinIO endpoints)
 
@@ -314,7 +346,7 @@ Uses HLS.js for playback. This is an example client — the production frontend 
 
 ## Testing & Linting
 - Test framework: **pytest** + `pytest-django`, installed in the `api` image. Run via `docker compose exec web pytest …` — see [Running Tests](#running-tests) for the full command set.
-- Test files live under `backend/app/tests/` (22 files: `test_adversarial_pass3.py`, `test_counter_store.py`, `test_db_router.py`, `test_feed_pool.py`, `test_https_termination.py`, `test_integration_concurrency.py`, `test_integration_pgvector.py`, `test_metrics_endpoint.py`, `test_metrics.py`, `test_observability_tui.py`, `test_orphan_cleanup.py`, `test_scraper.py`, `test_security_and_validation.py`, `test_sentry.py`, `test_services_comments.py`, `test_services_follows.py`, `test_services_interactions.py`, `test_services_shares.py`, `test_services_uploads.py`, `test_settings.py`, `test_smoke.py`, `test_task_publisher.py`).
+- Test files live under `backend/app/tests/` (23 files: `test_adversarial_pass3.py`, `test_counter_store.py`, `test_db_router.py`, `test_feed_pool.py`, `test_https_termination.py`, `test_integration_concurrency.py`, `test_integration_pgvector.py`, `test_metrics_endpoint.py`, `test_metrics.py`, `test_observability_tui.py`, `test_orphan_cleanup.py`, `test_scraper.py`, `test_security_and_validation.py`, `test_sentry.py`, `test_services_comments.py`, `test_services_follows.py`, `test_services_interactions.py`, `test_services_shares.py`, `test_services_uploads.py`, `test_settings.py`, `test_smoke.py`, `test_system_health.py`, `test_task_publisher.py`).
 - All tests run against PostgreSQL in Docker. No SQLite fallback.
 - No linting/formatter config (no `.eslintrc` at root, no `pyproject.toml`, no `ruff.toml`).
 - CI: `.github/workflows/django.yml` runs migrations + the test suite via Docker. Blocks merges on failure.
@@ -334,7 +366,7 @@ The skips carry inline reasons and a pointer back to this section. If you add a 
 
 ### Local `.env` discipline
 
-- `.env` is **gitignored**. Do not commit it. The boilerplate is `.env.example` and `env.example`; copy one of those to `.env` and edit locally.
+- `.env` is **gitignored**. Do not commit it. The boilerplate is `.env.example`, `.env.vps.example`, and `.env.laptop.example`; copy one of those to `.env` and edit locally. The `.gitignore` allows committing `*.example` files (see `.gitignore` exception rules for `.env.*.example`).
 - Tracked env files must have `DJANGO_DEBUG=False`. CI runs `scripts/check_no_tracked_env.sh` on every PR; a tracked env file with `DJANGO_DEBUG=True` will block the merge.
 - `HF_TOKEN` and `DJANGO_SECRET_KEY` in your local `.env` are real secrets. If you accidentally commit them, rotate them immediately.
 
@@ -372,6 +404,7 @@ Keep changes minimal and additive — the file is read on every session. Don't a
 - `docs/EXPLAIN/operations/hf-token-rotation.md` — HF_TOKEN rotation runbook (B17)
 - `docs/EXPLAIN/observability/04-prometheus-grafana-setup.md` — Prometheus + Grafana activation (A8)
 - `docs/EXPLAIN/database/05-read-replica-design.md` — read-replica design + activation playbook (A5)
+- `docs/EXPLAIN/DEPLOYMENT/` — Hybrid deployment documentation (VPS + laptop + Cloudflare R2 + Tailscale)
 
 ## Responsible Coding & Anti-Slop Protoco
 As an autonomous coding agent, your primary directive is **sustainable, high-signal execution**. You must prioritize long-term maintainability, security, and clarity over rapid, superficial code generation. 
