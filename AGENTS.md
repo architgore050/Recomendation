@@ -274,6 +274,120 @@ Uses Docker Compose V2 (`docker compose`, not `docker-compose`). If you have `do
 | `PHYSICAL_ADDRESS` | Registered office / physical address (IT Rules 2021 / Consumer Protection). Not yet exposed in `/legal/compliance/` endpoint (open). |
 
 
+## Indian Regulatory Compliance — Backend Changes
+
+This section documents all backend changes made to comply with:
+- **DPDP Act 2023** (Digital Personal Data Protection Act) — consent, children's data, DPO, breach notification, cross-border
+- **IT Rules 2021** (Intermediary Guidelines) — grievance officer, nodal contact, compliance officer, traceability, content moderation
+- **CERT-In Directions 2022** — 180-day log retention, 6-hour breach notification
+- **Copyright Act 1957** — user upload licensing, attribution
+- **Consumer Protection (E-Commerce) Rules 2020** — grievance redressal, country of origin
+- **RBI Data Localisation** — financial data must reside in India
+
+### Phase A — DPDP Consent & Age Gating (COMPLETED)
+
+**Models (`backend/app/models.py`):**
+- Added `User.is_minor` (BooleanField, default=False) — computed from DOB at registration
+- Added `User.minor_consent_verified` (BooleanField, default=False) — parent consent for minors
+- Added `User.consent_accepted` (BooleanField, default=False) — explicit consent flag
+- Added `User.dob` (DateField, nullable) — date of birth for age gate
+- Added `User.parent_email` (EmailField, nullable) — for minor consent flow
+- Added `ConsentAudit` model (lines 61-77) — immutable audit trail: `user`, `consent_issued_at`, `terms_version_id`, `privacy_version_id`, `ip_address`, `user_agent`, `withdrawn_at`, `identity_retained_until` (CERT-In 180-day retention)
+- Added `CheckConstraint` on `AudioClip.likes`, `shares`, `skips`, `comment_count` >= 0 (DB-level negative counter prevention)
+
+**Serializers (`backend/app/serializers.py`):**
+- `RegisterSerializer` now requires `consent_accepted` (BooleanField, required=True) and `terms_version` (validated against `TERMS_VERSIONS` env var)
+- Added `dob` and `parent_email` fields for age gate
+- Validation logic computes `is_minor` from DOB; if minor, `minor_consent_verified` defaults False (requires parent flow)
+- Creates `ConsentAudit` row on successful registration (audit trail persists even if user creation rolls back)
+- Magic-byte audio validation (lines 16-21, 128-133) — pure-Python allowlist + python-magic layer-2 check before ffmpeg
+- Copyright acknowledgment enforcement (lines 178-191) — user must acknowledge before DB persistence
+- Duration probe at upload (lines 236-251) — prevents 24h WAV abuse via pydub/ffprobe
+- Comment text sanitization (lines 350-365) — null-byte / control-char stripping
+- `watch_time_ms` capped at 10h (lines 373-376) — prevents viewbot inflation
+
+**Views (`backend/app/views/auth.py`):**
+- Registration endpoint accepts consent fields, creates `ConsentAudit` via serializer
+- `/auth/register/` returns access + refresh tokens with consent confirmation
+
+**Tests (`backend/app/tests/test_auth_regulatory.py`, `test_security_and_validation.py`):**
+- `test_register_success` validates consent fields required
+- `test_user_has_dob_and_computed_is_minor` uses `date()` objects for DOB
+- Compliance endpoint requires auth + returns JSON
+
+### Phase B — Grievance & Compliance Officers (COMPLETED)
+
+**Models (`backend/app/models.py`):**
+- Added `Grievance` model (lines 269-295) — DB table per audit: `user`, `category`, `description`, `status`, `assigned_officer`, `resolution`, `created_at`, `resolved_at`, `escalated`, `ip_address`, `user_agent`
+- `Grievance.category` choices: `content`, `privacy`, `account`, `payment`, `other`
+- `Grievance.status` choices: `open`, `in_progress`, `resolved`, `rejected`, `escalated`
+- Added `AuditLog` model (lines 297-320) — CERT-In 180-day log retention: `user`, `action`, `resource_type`, `resource_id`, `metadata`, `ip_address`, `user_agent`, `created_at`
+- `AuditLog` indexes on `(user, -created_at)` and `(resource_type, resource_id)`
+
+**Settings (`backend/EchoFlow/settings.py`):**
+- Env-driven regulatory contacts (lines 643-657): `COMPLIANCE_OFFICER_EMAIL`, `GRIEVANCE_OFFICER_EMAIL`, `NODAL_CONTACT_EMAIL` (with defaults)
+- `TERMS_VERSIONS` env var (comma-separated) for consent versioning
+- `AWS_S3_REGION_NAME` assertion for `ap-south-1` / `ap-south-2` (DPDP + RBI)
+
+**Views (`backend/app/views/data_subject.py`):**
+- `/legal/compliance/` — returns officer contacts (IT Rules 4(1)(a)(b)(c))
+- `/auth/consent/withdraw/` — sets `ConsentAudit.withdrawn_at`, triggers 30-day cooling-off soft-delete (DPDP §14)
+- `/auth/data/export/` — DPDP §14 data portability: exports all user data as JSON
+- `/auth/data/delete/` — DPDP §14 right to erasure with CERT-In retention override
+
+**Tests (`backend/app/tests/test_system_health.py`, `test_auth_regulatory.py`):**
+- Grievance endpoint validation
+- Compliance endpoint requires auth + returns JSON
+
+### Phase C — Content Moderation Pipeline (COMPLETED)
+
+**Services (`backend/app/services/content_moderation.py`):**
+- v1 offline moderation: `sha256` fingerprint of normalized file + blocked-phrase list against lowercase transcript + AI tags
+- `AudioClip.moderation_approved` boolean gate (models.py:113) — HLS generation only runs when True
+- `process_audio_to_hls` task checks `moderation_approved` before processing
+- `FINGERPRINT_BLOCKLIST` module-level set (TODO: move to Redis for production)
+
+**Uploads (`backend/app/services/uploads.py`):**
+- `trigger_hls_processing` enqueues task only after moderation approval
+- `finalize_upload` no longer enqueues HLS task (flow changed)
+
+### CERT-In 180-Day Log Retention (COMPLETED)
+
+**Models (`backend/app/models.py`):**
+- `AuditLog` with `identity_retained_until = created_at + 180 days` (CERT-In §5(1))
+- `ConsentAudit.identity_retained_until = consent_issued_at + 180 days`
+- `Grievance` retains user identity for 180 days post-resolution
+
+**Middleware (`backend/app/middleware.py`):**
+- Request/response audit logging (lines 292-293) — DB write overhead accepted for audit trail
+- Correlation ID propagation for cross-service tracing
+
+### S3 Region Enforcement (COMPLETED)
+
+**Settings (`backend/EchoFlow/settings.py`):**
+- `STORAGES["default"]["OPTIONS"]["region_name"]` asserted to `ap-south-1` / `ap-south-2` / `auto` (lines 492-498)
+- Signed S3 URLs instead of public bucket (lines 467-479)
+
+### Environment Variables Required (see above)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `TERMS_VERSIONS` | Comma-separated consent versions (e.g. `v1.0,v1.1`) | `v1.0` |
+| `COMPLIANCE_OFFICER_EMAIL` | CCO email (IT Rules 4(1)(b)) | `compliance@echoflow.in` |
+| `GRIEVANCE_OFFICER_EMAIL` | Grievance email (IT Rules 4(1)(a)) | `grievance@echoflow.in` |
+| `NODAL_CONTACT_EMAIL` | Nodal contact email (IT Rules 4(1)(c)) | `nodal@echoflow.in` |
+| `AWS_S3_REGION_NAME` | **Must be `ap-south-1` or `ap-south-2`** for DPDP/RBI | `auto` (prod must override) |
+| `PHYSICAL_ADDRESS` | Registered office (IT Rules / Consumer Protection) | Not yet exposed |
+
+### Remaining Gaps (Open)
+
+- Public clip endpoint needs `moderation_approved` filter (TODO in `docs/INDIA-REGULATORY-READINESS.md`)
+- Multilingual India-specific prohibited-content database to replace blocked phrase list (TODO in `services/content_moderation.py:19-20`)
+- Transcript text persistence from `process_audio_to_hls` task (TODO in `services/content_moderation.py:167-175`)
+- Takedown workflow endpoint (`POST /clips/{id}/takedown/`)
+- `pydub` temp-file stream for memory pressure (TODO in `serializers.py:250`)
+
+
 ## HTTPS / TLS Termination
 The stack now ships with an nginx reverse proxy in front of every other service. TLS is terminated at the edge; internal hops (nginx→gunicorn, nginx→minio) stay plain HTTP on the docker bridge. No application code knows TLS exists.
 
