@@ -165,9 +165,9 @@ Single multi-stage `Dockerfile` with five stages (two are build-only):
 |---|---|---|
 | `base` | parent of all | apt union (libpq-dev, gcc, postgresql-client, ffmpeg, libsndfile1), appuser (UID 1000) |
 | `py-deps-api` | no | installs requirements-base.txt offline from wheelhouse into site-packages |
-| `py-deps-media` | no | requirements-media.txt + bakes HuggingFace models to `/home/appuser/.cache/huggingface` |
+| `py-deps-media` | no | requirements-media.txt + bakes HuggingFace models into the `echoflow-hf` cache mount, then `cp -a` to `/home/appuser/hf_baked` so the models persist into the layer (see "HuggingFace bake copy-to-layer" below) |
 | `api` | yes | web, celery, celery_feed, celery_beat — small image, no wheels/models |
-| `media` | yes | celery_media — adds baked HF models; runtime `HF_HOME=/home/appuser/.cache/huggingface` |
+| `media` | yes | celery_media — `COPY --from=py-deps-media /home/appuser/hf_baked /home/appuser/.cache/huggingface`; runtime `HF_HOME=/home/appuser/.cache/huggingface` |
 
 Final images receive dependencies via `COPY --from=py-deps-* /opt/venv /opt/venv`
 and source via an explicit allowlist (`backend/` — incl. `wait_for_db.py`
@@ -177,6 +177,35 @@ for the worker services sharing that image); `media` pings its own Celery node.
 HF_TOKEN is delivered ONLY via BuildKit secret mount
 (`--mount=type=secret,id=hf_token`) — never `--build-arg`, which would persist
 the token in builder layer history readable by `docker history`.
+
+**HuggingFace bake copy-to-layer** (added 2026-09-07, fixed the `celery_media` build):
+
+BuildKit `--mount=type=cache` is **ephemeral** — the cache target is a temporary
+overlay that exists only during the `RUN` command. Files written into the
+cache mount are saved to the BuildKit cache store (for future build speedup)
+but are **not** part of the committed layer's filesystem. A subsequent
+`COPY --from=py-deps-media <cache-mount-path>` therefore fails with
+`not found` — the path exists during the `RUN` but is invisible to the
+layer graph.
+
+The fix: after the model download commands, the `py-deps-media` RUN ends
+with `cp -a /home/appuser/.cache/huggingface /home/appuser/hf_baked`. This
+materializes the cache contents into a regular filesystem path that **does**
+persist into the layer. The `media` stage then `COPY --from=py-deps-media
+/home/appuser/hf_baked /home/appuser/.cache/huggingface` lands the baked
+models at the runtime `HF_HOME` path unchanged. Runtime env vars
+(`HF_HOME`, `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1` in
+`docker-compose.yml`) are NOT modified.
+
+Tradeoff: ~250 MB is now in both the BuildKit `echoflow-hf` cache AND the
+layer. The BuildKit cache is for cross-build speed (it only costs disk
+locally and is not in the image); the layer copy is what's shipped. Final
+image size is unchanged at the user-visible layer.
+
+CI guards against regression: `.github/workflows/docker-image.yml` runs a
+smoke test on every PR that builds the `media` target, loading the
+freshly-built image and asserting the baked HF models load in
+`HF_HUB_OFFLINE=1` mode.
 
 ```bash
 # Build all targets
@@ -251,7 +280,7 @@ docker builder prune                                # CAREFUL — wipes dangling
 - Adding/changing a package in `Dockerfile` apt-get list invalidates the `base` stage → next build re-downloads everything → caches are repopulated transparently.
 - The `wheelhouse/` directory changing (new wheels added) invalidates `wheelhouse-base` → both py-deps stages rebuild.
 - HuggingFace model upgrade → invalidate manually with `docker buildx prune --filter id=echoflow-hf`. There is no automatic signal from inside the build that the upstream model changed.
-- CI runners (GitHub Actions) start with empty caches — first CI build is always cold. Subsequent jobs on the same runner can reuse caches if you enable `cache-from` / `cache-to` in a CI step (not currently configured).
+- CI runners (GitHub Actions) start with empty BuildKit **named** caches (echoflow-apt / echoflow-pip / echoflow-hf) — they only speed up repeated local builds on the same machine. The **layer** cache IS persisted across CI runs via `cache-from: type=gha,scope=${{ matrix.target }}` in `.github/workflows/docker-image.yml`. The scope is per-matrix-target so a source-only change doesn't bust the heavy media layer cache and vice-versa. The named mount caches (especially `echoflow-hf` at ~250 MB) re-download on every CI run; if that becomes a CI cost issue, see `docs/EXPLAIN/docker/01-multi-stage-dockerfile.md` §"BuildKit cache" for the registry-backed upgrade.
 
 **What is intentionally NOT cached:**
 - `/var/lib/apt/lists/` — stale package indexes can silently serve vulnerable `.deb` files. `apt-get update` runs on every build; security wins over re-download speed.

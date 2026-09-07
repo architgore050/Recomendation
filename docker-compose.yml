@@ -10,7 +10,16 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/test/postgres-init/init-pgvector.sql:/docker-entrypoint-initdb.d/01-init-pgvector.sql:ro
+      # docker/postgres-init/ runs once on first startup. It:
+      #   1. Installs pgvector on template1 (00-init-pgvector.sql) so every
+      #      future CREATE DATABASE inherits the vector extension.
+      #   2. Provisions an `echoflow_test` database alongside the main
+      #      `echoflow_db` (01-echoflow-test-db.sql) for dev environments
+      #      that set DATABASE_URL=...echoflow_test in their .env.
+      # The separate docker-compose.test.yml still spins up its own
+      # echoflow_test container for the pytest suite (in CI / make-test);
+      # this main-db provisioning is for `docker compose up` dev only.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
     healthcheck:
