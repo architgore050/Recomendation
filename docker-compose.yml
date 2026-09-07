@@ -10,6 +10,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/test/postgres-init/init-pgvector.sql:/docker-entrypoint-initdb.d/01-init-pgvector.sql:ro
     ports:
       - "5432:5432"
     healthcheck:

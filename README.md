@@ -157,7 +157,7 @@ Full design and invalidation rules: [docs/EXPLAIN/docker/01-multi-stage-dockerfi
 
 EchoFlow includes a license-aware scraper for seeding the catalog from public, openly-licensed archives. It respects `robots.txt`, enforces per-host rate limits, validates content type, enforces a max download size, and normalizes/trims audio via pydub.
 
-**Supported sources** (from `backend/app/scrapers/sources/`):
+**Supported sources** (from `ai_ml/scrapers/sources/`):
 
 | Source | Requirement | License enforcement |
 |--------|-------------|---------------------|
