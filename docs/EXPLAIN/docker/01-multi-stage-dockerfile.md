@@ -140,6 +140,20 @@ RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
 #     which is owned by UID 1000.
 #   * sharing=locked — two concurrent builds never race on a half-written
 #     model file.
+#
+#   CRITICAL — the trailing `cp -a ... /home/appuser/hf_baked`:
+#   BuildKit --mount=type=cache is ephemeral. Files written to the cache
+#   target exist ONLY during this RUN command. They are saved to the
+#   BuildKit cache store (id=echoflow-hf) for future-build speedup, but
+#   they are NOT part of this layer's filesystem. Without the cp below,
+#   the `media` stage's subsequent `COPY --from=py-deps-media
+#   /home/appuser/.cache/huggingface ...` would fail with
+#   `"/home/appuser/.cache/huggingface": not found` — the path exists
+#   during the RUN but is invisible to the layer graph. The cp
+#   materializes the cache contents into a regular filesystem path
+#   that DOES persist into the layer, which the media stage then
+#   picks up. The named cache still gives cross-build speed; this cp
+#   only runs on the build host, not in the shipped image.
 RUN --mount=type=secret,id=hf_token \
     --mount=type=cache,id=echoflow-hf,target=/home/appuser/.cache/huggingface,sharing=locked,uid=1000,gid=1000 \
     set -eu; \
@@ -148,7 +162,8 @@ RUN --mount=type=secret,id=hf_token \
     fi; \
     python -c "from faster_whisper import WhisperModel; m = WhisperModel('base', device='cpu', compute_type='int8'); del m"; \
     python -c "from sentence_transformers import SentenceTransformer; m = SentenceTransformer('all-MiniLM-L6-v2'); del m"; \
-    python -c "from keybert import KeyBERT; m = KeyBERT(); del m"
+    python -c "from keybert import KeyBERT; m = KeyBERT(); del m"; \
+    cp -a /home/appuser/.cache/huggingface /home/appuser/hf_baked
 ```
 
 ### Key Points
@@ -157,6 +172,7 @@ RUN --mount=type=secret,id=hf_token \
 - **Model baking** — downloads + caches at build time
 - **Cache env vars** set before baking (copied to final)
 - **`set -eu` not `-x`** — prevents token leak in logs
+- **`cp -a` after the model downloads** — materializes the ephemeral cache contents into a layer-visible path so the `media` stage's `COPY --from=py-deps-media` can find them. Without this, the build fails with `not found` even though the model downloads "succeeded".
 
 ---
 
@@ -214,9 +230,16 @@ ENV PATH="/opt/venv/bin:$PATH" \
 LABEL org.opencontainers.image.title="echoflow-media" \
       org.opencontainers.image.description="EchoFlow heavy_media Celery worker (FFmpeg + baked HuggingFace models)"
 
-# Baked models from builder
+# Baked models from builder. Source is `/home/appuser/hf_baked` (a
+# regular filesystem path), NOT the cache-mount path
+# `/home/appuser/.cache/huggingface` — the latter is ephemeral and
+# not part of the layer. The `cp -a` in `py-deps-media` (above)
+# materializes the cache contents into a layer-visible path so this
+# COPY can find them. Destination stays at the runtime `HF_HOME`
+# path so the celery_media container's offline mode works
+# unchanged.
 COPY --from=py-deps-media --chown=appuser:appgroup \
-     /home/appuser/.cache/huggingface /home/appuser/.cache/huggingface
+     /home/appuser/hf_baked /home/appuser/.cache/huggingface
 
 # Same explicit allowlist
 COPY --chown=appuser:appgroup backend/ ./backend/

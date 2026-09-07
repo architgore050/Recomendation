@@ -14,7 +14,16 @@ def save_clip(user, title, source_name, source_url, license, attribution_text, l
     Returns the created AudioClip instance.
     """
     # Local import to avoid import-time side effects
-    from ..models import AudioClip
+    # DECISION: Use the absolute `backend.app.models` import path. The
+    # previous `from ..models import AudioClip` was a relative import left
+    # over from when the scraper lived at `backend/app/scrapers/uploader.py`.
+    # After the move to `ai_ml/scrapers/uploader.py` (commit b4f749d),
+    # `..models` resolves to `ai_ml.models` which only contains ML model
+    # wrappers (whisper / embedding / keybert / acoustic), NOT the Django
+    # `AudioClip` ORM model. Every other file in `ai_ml/` that needs the
+    # ORM uses the absolute path (see ai_ml/pipelines/recommendation.py:195
+    # for the canonical example) — this file now matches that pattern.
+    from backend.app.models import AudioClip
 
     date = datetime.datetime.utcnow().strftime("%Y/%m/%d")
     dest_rel_dir = f"audio_scraper/{source_name}/{date}"

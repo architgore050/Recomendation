@@ -300,11 +300,15 @@ Two stacks are available after `docker compose up`:
 The stdlib-based `scripts/observability_tui.py` is still available for quick spot-checks when no browser is handy.
 
 ## Testing
-**Current count: 275 passed, 6 skipped, 0 failed** (6 skipped = 1 ffmpeg-environmental + 5 nginx-environmental).
+**Current count: 275 passed, 6 skipped, 0 failed** (6 skipped = 1 ffmpeg-environmental — `test_scraper.py` only runs in Docker where ffmpeg is installed — and 5 live-nginx-environmental — `TestLiveNginxTerminator` requires the full `docker compose up` stack with nginx reachable).
 
-The test suite lives under `backend/app/tests/` (23 files) and uses `pytest` + `pytest-django`. Run via `docker compose exec web pytest …`. See [AGENTS.md](AGENTS.md) → "Running Tests" for the full command set.
+The test suite lives under `backend/app/tests/` (24 files) and uses `pytest` + `pytest-django`. Run via `docker compose exec web pytest …`. See [AGENTS.md](AGENTS.md) → "Running Tests" for the full command set.
 
 **Docker-only test stack:** All tests run against PostgreSQL in Docker — no SQLite fallback. The `conftest.py` auto-creates the `echoflow_test` database, installs pgvector on `template1`, and handles session teardown. Run the test stack: `docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d` then `docker compose exec -e PYTHONPATH=/app web pytest backend/app/tests/ --tb=short`.
+
+**Two database setups, two stacks:** the `db` service in `docker-compose.yml` provisions both `echoflow_db` (main) and `echoflow_test` (dev) on a fresh data directory, with pgvector installed on `template1` so both inherit the extension. The `docker-compose.test.yml` override adds its own dedicated `echoflow_test_db` container for the pytest suite (clean isolation from dev data). See [AGENTS.md](AGENTS.md) → "Postgres init scripts" for the run-order dependency.
+
+**Pre-existing test isolation caveat:** `TestLiveNginxTerminator` only skips when no `nginx:443` is reachable from the test container. If the main stack's nginx is up while you run the test stack, the fixture detects it, runs the live test, and gets HTTP 502 because the upstream is the main `web` (not the test web). Workaround: `docker compose stop nginx` before running tests; or run tests on a host where the main stack is not running. Tracked as a separate issue.
 
 Integration tests that need real Postgres + Redis + S3 (pgvector HNSW indexes, row-level locks, Redis Streams, concurrent transactions) are marked with `@pytest.mark.integration`. They auto-skip on the local SQLite + LocMem test environment and run in CI where the workflow provisions real services. Run them locally: `pytest backend/app/tests/ -m integration`.
 
