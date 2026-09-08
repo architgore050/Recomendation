@@ -28,6 +28,7 @@ frontend/sample_frontend
 backend/media/
 /frontend/sample_frontend2/node_modules
 /frontend/old_frontend
+ai_ml/scrapers
 # Docker specific
 .dockerenv
 .dockerinit
