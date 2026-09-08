@@ -7,6 +7,7 @@ To re-enable:
 2. Uncomment the `podcast_index` import and `'podcast_index': podcast_index` entry in __init__.py
 3. Uncomment `'podcast_index'` in SCRAPER_SOURCES in backend/EchoFlow/settings.py
 """
+import hmac
 import logging
 import time
 import hashlib
@@ -22,24 +23,24 @@ def _auth_headers():
     """Build Podcast Index API auth headers.
 
     Podcast Index requires X-Auth-Key (key) + X-Auth-Date (unix timestamp) +
-    User-Agent. The API also accepts an X-Auth-SHA header for HMAC-style
-    verification (some endpoints require it). For search, key+date+UA is
-    sufficient.
+    X-Auth-Sig (HMAC-SHA256 signature) + User-Agent.
     """
     api_key = getattr(settings, 'SCRAPER_PODCAST_INDEX_API_KEY', '') or ''
     api_secret = getattr(settings, 'SCRAPER_PODCAST_INDEX_API_SECRET', '') or ''
     if not api_key or not api_secret:
         return None
     ts = str(int(time.time()))
+    sig = hmac.new(
+        f"{api_key}{ts}".encode('utf-8'),
+        f"{api_key}{ts}".encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
     headers = {
         'X-Auth-Key': api_key,
         'X-Auth-Date': ts,
+        'X-Auth-Sig': sig,
         'User-Agent': 'EchoFlowScraper/1.0',
     }
-    # SHA1 hash of "key|secret|ts" — required by some endpoints; harmless if
-    # not validated by /search.
-    sha = hashlib.sha1(f"{api_key}|{api_secret}|{ts}".encode('utf-8')).hexdigest()
-    headers['X-Auth-SHA'] = sha
     return headers
 
 
