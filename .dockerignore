@@ -38,7 +38,8 @@ cache
 
 # Frontend (built/served separately, not needed in backend images)
 frontend
-
+mobile
+ai_ml/scrapers
 # NOTE: wheelhouse/ MUST stay in the build context — the Dockerfile COPYs it.
 
 # Docker
@@ -52,6 +53,7 @@ Startup_related_docs
 backend/scripts
 hidden folder
 .cache/pip/
+AGENTS.md
 
 # Test artifacts
 *.log
