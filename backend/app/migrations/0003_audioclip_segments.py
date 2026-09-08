@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app', '0002_scraper_license_flags'),
+        ('app', '0002_merged_scraper_flags'),
     ]
 
     operations = [

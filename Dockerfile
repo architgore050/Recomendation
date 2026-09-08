@@ -95,7 +95,7 @@ WORKDIR /app
 # pinned requirements files change.
 FROM base AS wheelhouse-base
 
-COPY requirements-base.txt requirements-media.txt constraints.txt ./
+COPY requirements-base.txt requirements-media.txt requirements-online.txt constraints.txt ./
 COPY wheelhouse/ /wheelhouse/
 
 

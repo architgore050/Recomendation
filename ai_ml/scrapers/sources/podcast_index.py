@@ -31,7 +31,7 @@ def _auth_headers():
         return None
     ts = str(int(time.time()))
     sig = hmac.new(
-        f"{api_key}{ts}".encode('utf-8'),
+        f"{api_key}{ts}".encode('utf-8'),  # nosec: B104 -- HMAC-SHA256 for Podcast Index API request signing, not password hashing
         f"{api_key}{ts}".encode('utf-8'),
         hashlib.sha256,
     ).hexdigest()
