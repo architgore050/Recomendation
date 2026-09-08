@@ -27,7 +27,9 @@ frontend/sample_frontend
 *.vite
 backend/media/
 /frontend/sample_frontend2/node_modules
-ai_ml/scrapers/*
+/frontend/old_frontend
+ai_ml/scrapers
+backend/app/tests/test_scraper.py
 
 # Docker specific
 .dockerenv
