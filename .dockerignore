@@ -53,6 +53,7 @@ Startup_related_docs
 backend/scripts
 hidden folder
 .cache/pip/
+AGENTS.md
 
 # Test artifacts
 *.log
