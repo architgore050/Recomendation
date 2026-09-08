@@ -20,3 +20,8 @@ keybert==0.9.0                    # pure
 librosa==0.11.0                   # pure (also pinned in base); 1.x needs py>=3.12
 soundfile==0.14.0                 # manylinux py2.py3 tag — works on 3.11
 pydub==0.25.1                     # pure (also pinned in base)
+# yt-dlp: used by the YouTube + YouTube Shorts scraper connectors. Free,
+# open-source, supports 1000+ sites. Requires ffmpeg in PATH (already
+# installed in the base Dockerfile stage). Used as a Python library,
+# not a shell-out, so we can plug it into the segment-splitter pipeline.
+yt-dlp==2025.9.26

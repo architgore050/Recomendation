@@ -820,14 +820,28 @@ def cleanup_stuck_processing(threshold_minutes=15, max_per_run=50):
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60, autoretry_for=RETRYABLE_ERRORS, retry_backoff=True, retry_backoff_max=600)
-def scrape_and_import(self, source_name, limit=5, clip_length=300):
+def scrape_and_import(self, source_name, limit=5, clip_length=300, allow_nc=None, include_share_alike=None):
     """Celery task wrapper to run a scraper source and import clips.
 
     This task delegates to the source connectors and uses the local
     downloader/normalizer/uploader to create `AudioClip` records and
     then triggers `process_audio_to_hls` for each created clip.
+
+    License enforcement mirrors the management command (closes the gap noted
+    in docs/EXPLAIN/scraping/03-licensing-safety.md): items whose license
+    family does not permit commercial use are skipped unless allow_nc=True.
+    CC-BY-SA items are imported with requires_share_alike=True and
+    moderation_approved=False (model default), so they require operator
+    approval via /clips/{id}/approve-moderation/ before reaching feeds.
     """
     from ai_ml.scrapers.sources import SOURCES
+    from ai_ml.scrapers.base import (
+        normalize_license,
+        license_features,
+        license_allows_commercial,
+        is_share_alike_license,
+    )
+    from django.conf import settings as dj_settings
     module = SOURCES.get(source_name)
     if not module:
         raise RuntimeError(f"Unknown source: {source_name}")
@@ -840,15 +854,32 @@ def scrape_and_import(self, source_name, limit=5, clip_length=300):
         user.set_unusable_password()
         user.save()
 
+    # Honor explicit overrides; else fall back to env-driven settings.
+    if allow_nc is None:
+        allow_nc = getattr(dj_settings, 'SCRAPER_ALLOW_NC', False)
+    if include_share_alike is None:
+        include_share_alike = getattr(dj_settings, 'SCRAPER_ALLOW_SHARE_ALIKE', False)
+
     from ai_ml.scrapers import downloader, normalizer, uploader
 
     items = module.fetch_audio(limit=limit)
+    imported = 0
+    skipped = 0
     for item in items:
         url = item.get('url')
         title = item.get('title') or 'scraped audio'
         page = item.get('page_url') or ''
-        license = item.get('license') or 'unknown'
+        lic_raw = item.get('license')
         original_id = item.get('id')
+        family = normalize_license(lic_raw)
+        nc, sa = license_features(family)
+        nc = nc or bool(item.get('is_noncommercial'))
+        if not license_allows_commercial(family, allow_nc=allow_nc):
+            logger.info("scrape_and_import: skipping %s license=%s family=%s",
+                        url, lic_raw, family)
+            skipped += 1
+            continue
+        sa = sa or is_share_alike_license(family)
 
         local_input = None
         tmp_out = None
@@ -866,14 +897,19 @@ def scrape_and_import(self, source_name, limit=5, clip_length=300):
                 title=title,
                 source_name=source_name,
                 source_url=page,
-                license=license,
+                license=lic_raw or 'unknown',
                 attribution_text=page,
                 local_file_path=tmp_out,
                 original_source_id=original_id,
+                is_noncommercial=nc,
+                requires_share_alike=sa,
+                license_family=family,
             )
 
             publish(process_audio_to_hls, str(clip.id))
-            logger.info("Imported clip %s from %s", clip.id, source_name)
+            imported += 1
+            logger.info("Imported clip %s from %s (family=%s nc=%s sa=%s)",
+                        clip.id, source_name, family, nc, sa)
 
         except Exception as e:
             logger.error("Failed to import %s: %s", url, e)
@@ -889,6 +925,9 @@ def scrape_and_import(self, source_name, limit=5, clip_length=300):
                         os.remove(p)
                 except Exception as e:
                     logger.error("Failed to clean up temp file %s: %s", p, e)
+
+    logger.info("scrape_and_import(%s): imported=%d skipped=%d allow_nc=%s sa=%s",
+                source_name, imported, skipped, allow_nc, include_share_alike)
 
 
 # ---------------------------------------------------------------------------

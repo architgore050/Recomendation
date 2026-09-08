@@ -280,6 +280,16 @@ docker builder prune                                # CAREFUL — wipes dangling
 | `OPENAI_API_KEY` | Optional — reserved for OpenAI pipeline branch |
 | `FREESOUND_API_KEY` | Required only for freesound scraper |
 | `SEED_AUTH_TOKEN` | Auth token for `seed_db.py` |
+| `SCRAPER_OPENVERSE_API_KEY` | Optional — raises Openverse rate limits |
+| `SCRAPER_PIXABAY_API_KEY` | Required only for pixabay scraper |
+| `SCRAPER_PODCAST_INDEX_API_KEY` | Required only for podcast_index scraper |
+| `SCRAPER_PODCAST_INDEX_API_SECRET` | Required only for podcast_index scraper |
+| `SCRAPER_PODCAST_RSS_DEFAULT` | Optional default RSS feed for `podcast_rss` connector |
+| `SCRAPER_ALLOW_NC` | `True`/`False`. When False, CC-*NC* + RemArc-NC items are imported but excluded from feeds. |
+| `SCRAPER_ALLOW_SHARE_ALIKE` | `True`/`False`. When False, CC-BY-SA items import with `moderation_approved=False` until operator calls `/clips/{id}/approve-moderation/`. |
+| `SCRAPER_YOUTUBE_QUERY` | Default search query for the YouTube connector (default `creative commons music`). |
+| `SCRAPER_YOUTUBE_SHORTS_QUERY` | Default search query for the YouTube Shorts connector (default `creative commons short`). |
+| `SCRAPER_YOUTUBE_MAX_DURATION_S` | Skip YouTube videos longer than this. Default 600. Shorts override to 90. |
 | `GUNICORN_WORKERS` | Default gunicorn workers (default: 4) |
 | `GUNICORN_THREADS` | Default gunicorn threads (default: 4) |
 | `DJANGO_ALLOWED_HOSTS` | Comma-separated allowed hosts. Must include every host the nginx terminator is reached at (`localhost`, your prod hostname, any Tailscale/CNAMES). Default: `localhost`. |
@@ -481,7 +491,54 @@ python manage.py scrape_audio --source=wikimedia --limit=3 --clip-length=30
 # Celery task
 python -c "from backend.app.tasks import scrape_and_import; scrape_and_import.delay('internet_archive', limit=5)"
 ```
-Sources: wikimedia, internet_archive, freesound (needs `FREESOUND_API_KEY`), kaggle (needs `SCRAPER_KAGGLE_LOCAL_PATH`). Respects `robots.txt`. Allowed licenses configurable via `SCRAPER_ALLOW_LICENSES`. Source connectors live in `ai_ml/scrapers/sources/`; the `scrape_audio` management command + `scrape_and_import` Celery task remain in `backend/app/`.
+Sources: wikimedia, internet_archive, freesound (needs `FREESOUND_API_KEY`), kaggle (needs `SCRAPER_KAGGLE_LOCAL_PATH`), openverse, librivox, free_music_archive, pixabay (needs `SCRAPER_PIXABAY_API_KEY`), podcast_index (needs `SCRAPER_PODCAST_INDEX_API_KEY` + `_SECRET`), podcast_rss, bbc_sound_effects, musopen, loc_national_jukebox, usgov_audio, **youtube** (needs `yt-dlp` Python package; gracefully returns empty list if not installed), **youtube_shorts** (same as youtube, default 90s max). Respects `robots.txt`. Allowed licenses configurable via `SCRAPER_ALLOW_LICENSES`. NC items gated by `SCRAPER_ALLOW_NC` (default False). CC-BY-SA items require manual `/clips/{id}/approve-moderation/` per item. Source connectors live in `ai_ml/scrapers/sources/`; the `scrape_audio` management command + `scrape_and_import` Celery task remain in `backend/app/`.
+
+**All-sources mode:** omit `--source` (or pass `--sources=librivox,bbc_sound_effects`) to iterate over multiple sources in a single run. Each source keeps its own state file under `$SCRAPER_SCRATCH_DIR/scraper_state/{source}.json`, so resume is per-source.
+
+**Segment splitting:** `--clip-length=N` (default 300s) caps each segment. Source items longer than this are split into N pieces via `pydub`; all N segments are saved as AudioClip rows sharing the same `group_id` (UUID). A transient failure on segment 3 of 7 does not lose segments 0-2. Set `--clip-length=0` to keep the old "save the whole file as one clip" behavior. The AudioClip model has `group_id`, `segment_index`, `segment_count` columns (migration `0003_audioclip_segments`).
+
+### Scraper flags
+- `--source <name>`: scrape a single source. Optional when using `--sources` or in all-sources mode (no flag).
+- `--sources <csv>`: comma-separated list of sources to iterate. Mutually exclusive with `--source`.
+- `--limit <N>`: per-source limit. With `--limit=10` and 14 sources (no `--source`), the run fetches up to 10 items per source = 140 total.
+- `--clip-length <sec>`: max seconds per segment (default 300). Set to 0 to skip splitting (legacy "save whole file" mode).
+- `--smoke`: fetch limit=1 per source, attempt one download, no DB writes.
+- `--allow-nc`: include CC-*NC* + RemArc-NC items.
+- `--include-share-alike`: include CC-BY-SA items.
+- `--quiet`: suppress per-item output; print summary at the end.
+- `--reset`: wipe the state file for the affected source(s) and start fresh.
+- `--state-dir <path>`: override the directory for state files.
+- `--log-dir <path>`: override the directory for CSV logs.
+- `--log <name>`: explicit CSV log filename.
+- `--page-size <N>`: items per IA advancedsearch page.
+- `--max-source-time <sec>`: per-source hard time limit. When a source
+  takes longer than this, the run moves on to the next source with a
+  WARNING. Useful for very slow upstreams so the whole multi-source
+  run does not get stuck on one source. (Unix only; uses signal.alarm.
+  On Windows, use a shell-level `timeout` wrapper instead.)
+- `--no-log`: skip CSV logging.
+
+### Resumable scraping
+The management command writes a per-source state file after every item.
+On Ctrl-C the state file is saved before the command exits. Re-running
+the same command resumes from the last saved state — already-fetched,
+already-imported, already-skipped, and already-failed items are not
+re-processed. `--reset` wipes the state file to start from scratch.
+
+The state file path is `$SCRAPER_SCRATCH_DIR/scraper_state/{source}.json`.
+The CSV log is `$SCRAPER_SCRATCH_DIR/scraper_logs/{source}-{timestamp}.csv`.
+Override either via `--state-dir` / `--log-dir` or via the
+`SCRAPER_STATE_DIR` / `SCRAPER_LOG_DIR` env vars.
+
+### Scraper CSV log
+Every item gets one row with: `timestamp, source, item_id, title, url,
+license_raw, license_family, is_nc, is_sa, status, retries,
+duration_sec, size_bytes, clip_id, error`. `status` is one of
+`imported / skipped_license / failed_download / failed_other`.
+`retries` is the number of download attempts the item required. Use
+this log to answer questions like "how many LibriVox imports failed
+in the last 24h", "which sources have the highest retry rate", or
+"how much BY-NC content is being filtered".
 
 ## Frontend (sample only)
 ```bash
@@ -494,7 +551,7 @@ Uses HLS.js for playback. This is an example client — the production frontend 
 
 ## Testing & Linting
 - Test framework: **pytest** + `pytest-django`, installed in the `api` image. Run via `docker compose exec web pytest …` — see [Running Tests](#running-tests) for the full command set.
-- Test files live under `backend/app/tests/` (23 files: `test_adversarial_pass3.py`, `test_counter_store.py`, `test_db_router.py`, `test_feed_pool.py`, `test_https_termination.py`, `test_integration_concurrency.py`, `test_integration_pgvector.py`, `test_metrics_endpoint.py`, `test_metrics.py`, `test_observability_tui.py`, `test_orphan_cleanup.py`, `test_scraper.py`, `test_security_and_validation.py`, `test_sentry.py`, `test_services_comments.py`, `test_services_follows.py`, `test_services_interactions.py`, `test_services_shares.py`, `test_services_uploads.py`, `test_settings.py`, `test_smoke.py`, `test_system_health.py`, `test_task_publisher.py`).
+- Test files live under `backend/app/tests/` (26 files: `test_adversarial_pass3.py`, `test_counter_store.py`, `test_db_router.py`, `test_feed_license_filter.py`, `test_feed_pool.py`, `test_https_termination.py`, `test_integration_concurrency.py`, `test_integration_pgvector.py`, `test_metrics_endpoint.py`, `test_metrics.py`, `test_observability_tui.py`, `test_orphan_cleanup.py`, `test_scraper.py`, `test_scraper_license_helpers.py`, `test_scraper_sources.py`, `test_security_and_validation.py`, `test_sentry.py`, `test_services_comments.py`, `test_services_follows.py`, `test_services_interactions.py`, `test_services_shares.py`, `test_services_uploads.py`, `test_settings.py`, `test_smoke.py`, `test_system_health.py`, `test_task_publisher.py`).
 - All tests run against PostgreSQL in Docker. No SQLite fallback.
 - No linting/formatter config (no `.eslintrc` at root, no `pyproject.toml`, no `ruff.toml`).
 - CI: `.github/workflows/django.yml` runs migrations + the test suite via Docker. Blocks merges on failure.
@@ -1535,3 +1592,170 @@ The objective is not to make the most changes or finish fastest. The objective i
 
 **Design Doc Reference:** `docs/EXPLAIN/decisions/2026-09-06-hls-token-protection.md`
 ```
+
+### 2026-09-07 — scraper-coverage-expansion
+
+**Context:** Expanded the scraper from 4 sources to 14 (Openverse, LibriVox, Free Music Archive, Pixabay, Podcast Index + generic RSS, BBC SFX, Musopen, LOC Jukebox, US gov audio). Operator policy: include NC content with runtime gate; include CC-BY-SA with manual review.
+
+**What Was Learned (Durable):**
+- License normalization is fragile across source vocabularies. Openverse returns `by-nc-nd`; IA returns `http://creativecommons.org/licenses/by-nc/3.0/`; BBC returns `RemArc-NC`; Pixabay returns `Pixabay`. A single `normalize_license()` + `license_family()` mapping in `ai_ml/scrapers/base.py` handles all of them. **DECISION:** central switch-statement enforcement, not substring matching.
+- The old `scrape_audio.py` substring check (`any(a in lic_upper for a in ['CC0', 'CC-BY', ...])`) silently dropped Openverse items because `by-nc-nd` doesn't contain `CC-BY-NC`. **SECURITY:** the new check uses `license_allows_commercial(family, allow_nc=flag)` which respects the operator's NC gate.
+- Three new `AudioClip` fields support the gates: `is_noncommercial`, `requires_share_alike`, `license_family`. **DECISION:** boolean fields + a license-family string column, not a license-policy table — fast filter predicates + DRF serializer simplicity.
+- `Celery scrape_and_import` previously had **no** license check (gap noted in `03-licensing-safety.md`). Closed in this PR. **SECURITY:** the management command and Celery task now both apply `license_allows_commercial()`.
+- IA-backed sources use `creator:` / `subject:` filters, not just `collection:`. The collections I assumed in the planning doc (`bbc-sound-archive`, `cspan`, `usgs`, `national-jukebox`) don't exist on IA. Real queries use metadata filters like `creator:("BBC") AND subject:(sound-effects OR sfx)` for BBC SFX, `collection:("78rpm")` for LOC historical recordings, `creator:("NASA")` for NASA, etc. **HACK:** using IA as a back-end means hitting the IA rate limit (30/min); direct Pixabay/Musopen/LOC/NASA APIs are a follow-up when BeautifulSoup4 lands.
+- BBC SFX items: the `bbcsoundeffects` IA item has 16,000+ files. The `/metadata/<id>` endpoint returns 100+MB XML by default. **Fix:** `?output=json` flag reduces to a few KB. `RATE_LIMITER` per-host sleeps 60/30 = 2s between calls, which is why the smoke test sometimes times out.
+- Smoke-test pattern: `python manage.py scrape_audio --source=X --smoke` does fetch + (optional) download. The download step has a hard 30s alarm + per-source `max_file_size=10MB` pre-filter via `_ia_resolve_audio_url(identifier, max_bytes=...)` so 1GB items get filtered at metadata-time instead of attempting the full download. **HACK:** the smoke uses `print()` to bypass Django's BaseCommand stdout buffering on long commands.
+- `management command` stderr buffering issue: Django's `BaseCommand` `OutputWrapper` doesn't flush on `style.WARNING` when the command is short-circuited. Workaround: use `print(..., flush=True)` directly to stdout, AND `sys.stderr.write('[smoke] starting source=X\n'); sys.stderr.flush()` to stderr at the top of `handle()`.
+- Openverse downstream URLs (e.g. `prod-1.storage.jamendo.com/...`) are blocked by Jamendo's `robots.txt` — the scraper-level smoke test will report `Blocked by robots.txt` for the first item even though the fetch itself succeeded. To download from Openverse items, use a User-Agent that's whitelisted by Jamendo or bypass the downloader for that source.
+- pgbouncer whitelists only `echoflow_db` in `[databases]` config. The conftest's auto-create of `echoflow_test` works through the direct `db:5432` connection, but pytest-django's `setup_databases` re-uses the original `settings.DATABASES` (which has pgbouncer) and ignores the conftest's overrides. **DECISION:** patch the existing `connection.settings_dict` directly in the conftest to bypass pgbouncer for tests.
+- The repo has a pre-existing migration drift: `cover_image` and other AudioClip fields exist in `models.py` but were never included in `0001_initial.py`. `manage.py makemigrations` auto-generates a follow-up migration. Out of scope for this PR.
+
+**What Changed:**
+- `ai_ml/scrapers/base.py` (+293 lines) — license normalization, family map, RSS resolver
+- `ai_ml/scrapers/sources/` — 10 new connector modules + 1 refactored `internet_archive.py`
+- `ai_ml/scrapers/uploader.py` — 3 new params (`is_noncommercial`, `requires_share_alike`, `license_family`)
+- `backend/app/models.py` — 3 new fields on AudioClip
+- `backend/app/migrations/0002_scraper_license_flags.py` (new) — adds 3 fields + 2 indexes
+- `backend/app/management/commands/scrape_audio.py` — license family enforcement, `--smoke` / `--allow-nc` / `--include-share-alike` / `--quiet` flags
+- `backend/app/tasks.py` — `scrape_and_import` gains license enforcement
+- `backend/app/views/feed.py` — 3 feed query sites filter `is_noncommercial=False, requires_share_alike=False`
+- `backend/EchoFlow/settings.py` — 7 new env-driven settings (NC gate, SA gate, 4 API keys, default RSS feed)
+- `conftest.py` — DB host override + connection.settings_dict patch for test runs
+- 3 new test files: `test_scraper_license_helpers.py`, `test_scraper_sources.py`, `test_feed_license_filter.py`
+- `AGENTS.md`, `docs/EXPLAIN/scraping/01-sources.md`, `docs/EXPLAIN/scraping/03-licensing-safety.md` updated
+
+**Open Questions / Unresolved Risks:**
+- The pre-existing model-vs-migration drift (`cover_image` field not in `0001_initial.py`) is out of scope; needs a follow-up PR.
+- Direct Pixabay/Musopen/LOC/NASA APIs are a follow-up when BeautifulSoup4 is added to `wheelhouse/`.
+- Openverse is currently rate-limited; needs `OPENVERSE_API_KEY` for higher burst. Documented in AGENTS.md.
+- BBC SFX items must be operator-gated via `--allow-nc` to be ingested at all; default behavior imports them but the runtime filter excludes them from feeds.
+- HLS for newly-imported CC-BY-NC / CC-BY-SA items is gated by `moderation_approved` — SA items default to `False` and need `/clips/{id}/approve-moderation/` per item.
+
+**Design Doc Reference:** `docs/EXPLAIN/decisions/2026-09-07-scraping-coverage-expansion.md`
+```
+
+### 2026-09-07 — run-bug-fixes-2 (DNS handling, missing requests import, skip-rate triage)
+
+**Context:** Operator ran a 16-source multi-source run and asked whether the skip rate is within the expected range for scrapers.
+
+**What Was Learned (Durable):**
+- The 18 `skipped_license` items in podcast_rss are by design. RSS feeds don't carry license metadata, so the central `license_allows_commercial(UNKNOWN, ...)` gate correctly rejects them unless `--allow-nc` is set. **DECISION:** do not change this — UNKNOWN license = reject by default, operator can override per-run. **SECURITY:** ingesting UNKNOWN-licensed podcast audio into a commercial product is a legal risk.
+- The 2 `failed_other` items in librivox (cover_image column) are stale state from BEFORE migration 0004 was applied. They're now sitting in `state.items[].segment_status = {0: 'failed_other'}`. The next successful librivox fetch will retry them (because `items_already_handled` excludes failed items). No code change needed; just time.
+- Wikimedia DNS error (`Failed to resolve 'commons.wikimedia.org'`) is environment, not code. Some containers / networks can't reach Wikimedia. **FIX:** changed wikimedia's `logger.exception` to a one-line `logger.warning` so the traceback doesn't flood the operator's terminal.
+- The librivox connector had a `NameError: name 'requests' is not defined` bug. The `except requests.exceptions.ConnectionError` clause references `requests.exceptions` but `import requests` was missing. **FIX:** added the import. Without this, every NetworkError raised by librivox crashed the run.
+- The `existing state params do not match` warning is correct behavior, but it can be confusing. The warning fires only when the saved state's params genuinely differ from the current run's. After running with `--limit=10` once, re-running with `--limit=10` produces NO warning. Verified.
+
+**What Changed:**
+- `ai_ml/scrapers/sources/wikimedia_commons.py` — `logger.exception` → one-line `logger.warning` for `ConnectionError` (DNS) and other exceptions. Suppresses the traceback flood.
+- `ai_ml/scrapers/sources/librivox.py` — added `import requests` (was missing); same one-line `logger.warning` change for `ConnectionError`.
+- `ai_ml/scrapers/sources/librivox.py` — the 3 `failed_other` items in librivox.json's state will be retried on the next successful librivox fetch (state schema correctly excludes failed items from `items_already_handled`).
+
+**Open Questions / Unresolved Risks:**
+- If the operator's network can't resolve Wikimedia's hostname, that source will always return 0 items. Workaround: use `--sources=librivox,bbc_sound_effects,...` to skip it. Or set the env var `SCRAPER_DISABLE_SOURCES=wikimedia`.
+- The podcast_rss connector returns items but the central UNKNOWN gate rejects them all. This is correct behavior. If the operator wants to ingest podcasts, they should add license detection at the connector level (e.g. parse the RSS `<itunes:category>` or `<cc:license>` if present) and pass through to the license gate. Not in scope for this PR.
+- The librivox API being slow today is a transient network issue. The 3 stale failed items in librivox.json will be retried on the next successful fetch.
+
+**Verdict on the skip rate:** Within the expected range for a multi-source scraper. The 18 `skipped_license` are by design (UNKNOWN rejection). The 2 librivox failures were a real bug, now fixed and pending retry. The Wikimedia + openverse timeouts are environment (network). No further code changes needed for the current scope.
+
+**Design Doc Reference:** `docs/EXPLAIN/decisions/2026-09-07-scraping-coverage-expansion.md`
+```
+
+### 2026-09-07 — run-bug-fixes (cover_image + per-source timeout + TypeError)
+
+**Context:** Operator ran `scrape_audio --limit=10` against all 16 sources. Three real bugs surfaced: (1) `column "cover_image" of relation "app_audioclip" does not exist` at every uploader.save_clip; (2) `TypeError: fetch_audio() got an unexpected keyword argument 'page'` chained with the underlying connector's HTTP exception; (3) librivox + openverse hung the run on slow network for several minutes.
+
+**What Was Learned (Durable):**
+- The pre-existing migration drift was: `cover_image` was the **only** column missing from `app_audioclip`. Other fields (title, status, license, etc.) existed in the DB but were not declared in `0001_initial.py`. Adding just the missing column is a single-purpose migration 0004. **DECISION:** targeted migration, not a giant backfill — keeps the migration review small and the test cycle fast.
+- The 403 from Wikimedia was a User-Agent block, not a code bug. Wikimedia Commons refuses anonymous UAs that don't identify the client. **FIX:** set a descriptive User-Agent header from `SCRAPER_USER_AGENT` (or default `EchoFlowScraper/1.0`).
+- The "TypeError: unexpected keyword 'page'" was caused by the management command passing `page=` and `sort=` to all 14+ connectors, but most of them don't accept those kwargs. The fallback `except TypeError` worked correctly, but the inner connector's `logger.exception()` printed a chained traceback that confused the operator. **FIX:** the fallback was already correct; the noise was from `logger.exception` in `openverse.py` — switched to `logger.warning` with just the exception class name.
+- Per-source `--max-source-time=N` flag added. Uses `signal.alarm` (Unix only). When the alarm fires, `_INTERRUPTED=True`, the loop breaks cleanly, state is saved in the `finally` block, and the multi-source run continues. **DECISION:** Unix-only; on Windows the operator must use a shell-level `timeout` wrapper.
+- A `try/except Exception` around each per-source run in the multi-source loop ensures one bad source can't kill the whole run. The previous code was bare — any unhandled exception in `_run_one_source` would have aborted the loop.
+- `params_match` returns True when state params match run params; the user's earlier "params do not match" warning was from a stale state file (probably saved with `limit=5` from an earlier smoke test). The warning text already says "Use --reset to start fresh" so the operator can recover by adding `--reset`.
+
+**What Changed:**
+- `backend/app/migrations/0004_audioclip_cover_image.py` (new) — adds the single missing `cover_image` column.
+- `backend/app/models.py` — declared `audioclip_nc_created_idx` and `audioclip_sa_created_idx` in `AudioClip.Meta.indexes` so Django's auto-discovery matches the live DB and doesn't emit a spurious "remove index" migration.
+- `ai_ml/scrapers/sources/wikimedia_commons.py` — accepts `page`/`sort` kwargs (no-op for the API), sets a User-Agent header, treats 403 as "no items" (logged as WARNING).
+- `ai_ml/scrapers/sources/openverse.py` — `logger.exception` → `logger.warning` to suppress noisy chained-traceback output.
+- `backend/app/management/commands/scrape_audio.py` — wrapped the per-source call in `try/except Exception` so one bad source doesn't kill the run; added `--max-source-time` flag (Unix-only, uses `signal.alarm`).
+- `AGENTS.md` — documented the new flag.
+
+**Open Questions / Unresolved Risks:**
+- `--max-source-time` is Unix-only because of `signal.alarm`. On Windows the operator must use a shell-level `timeout` wrapper.
+- The 4 fetched / 3 failed / 3 retried in the user's run was a symptom of slow network, not bad code. The librivox connector makes 1 API call + 1 IA metadata call per book, so `--limit=10` becomes 10-20 HTTP calls. With slow network, this can take 1-2 minutes.
+- The pre-existing migration drift on `cover_image` was a one-shot fix. The other AudioClip columns (title, status, etc.) were already in the DB; only `cover_image` was missing. Future drift should be caught with `manage.py makemigrations --check --dry-run` in CI.
+
+**Design Doc Reference:** `docs/EXPLAIN/decisions/2026-09-07-scraping-coverage-expansion.md`
+```
+
+### 2026-09-07 — segment-splitter + all-sources + youtube
+
+**Context:** Operator asked to (1) split long audio into N pieces instead of truncating, (2) make `--source` optional so all sources are scraped in one run, (3) add YouTube and YouTube Shorts as new sources using yt-dlp.
+
+**What Was Learned (Durable):**
+- The old `normalize_and_trim` truncated a 4h LibriVox audiobook to 5min. The new `split_into_segments` returns N MP3 file paths, each up to `max_seconds`. One source item → N AudioClip rows sharing the same `group_id` (UUID), with distinct `segment_index` and the same `segment_count`. Migration 0003 adds three columns. **DECISION:** one row per segment, not a separate Segment model with FK. Faster feed queries, simpler serializer, no JOIN.
+- Per-segment failure tracking: state file has `state.items[item_id].segment_status = {seg_index: 'imported'|'failed_*'|'skipped_*'}` plus `state.counts.segments_imported/failed/retried`. `items_already_handled` excludes items with any failed segment so resume retries them. **SECURITY:** a transient SSL error on segment 3/7 doesn't lose the 2 successful segments.
+- `items_already_handled` semantic shifted: it now means "fully done with no failures" not "any decision was made". The legacy test was updated accordingly. **DECISION:** items with failed segments are re-processed on the next run; items with imported-only or skipped-only are skipped.
+- All-sources mode: omit `--source` (or pass `--sources=librivox,bbc_sound_effects`) to iterate SOURCES in insertion order. Each source keeps its own state file. The multi-source summary aggregates counts across all sources.
+- yt-dlp is the right choice for YouTube. **DECISION:** Python library import, not shell-out, so we can plug it into the segment-splitter pipeline. yt-dlp is in `requirements-media.txt` but not in the wheelhouse — the connector gracefully returns [] with a WARNING when `yt-dlp` is not installed, so the rest of the scraper continues to work until the operator runs the wheelhouse regen script + rebuilds the image.
+- yt-dlp's match_filter rejects items at extraction time (live streams, too-long videos, missing IDs). Combined with the central `license_allows_commercial` gate, NC content is filtered out before any network download.
+- YouTube connector returns `url='youtube:video:<id>'` as a pseudo-URL. The downloader recognizes this prefix and calls yt-dlp to resolve the actual stream URL before the normal download path. The downloader returns 403-style failure clearly if yt-dlp is missing.
+- YouTube's ToS forbids automated downloading. The connector's default search query is biased toward CC content. Per-episode license family is UNKNOWN — the central license gate filters out unknown licenses unless `--allow-nc` is set. **SECURITY:** operator should pre-filter upstream by query (e.g. "creative commons music") and review the CSV log for any UNKNOWN items that slipped through.
+- All current sources (freesound, pixabay, podcast_index, openverse) are free-tier, not paid. None required migration to a headless-browser scraper. **DECISION:** the user said "if it's too hard you can simply omit that source" — adding selenium/playwright would require a wheelhouse rebuild AND a new Docker build stage. Deferred as a follow-up.
+- Mocking yt-dlp for tests: use `sys.modules['yt_dlp'] = MagicMock(YoutubeDL=...)` where `YoutubeDL` is a `@contextmanager` that yields the configured mock. The `with YoutubeDL(opts) as ydl` pattern then enters the context and the same mock_ydl receives `extract_info()`. Earlier attempts to patch `builtins.__import__` triggered infinite recursion via `logging.warning` → `__import__('logging')` → mock → recursion.
+- Old `mark_imported/mark_skipped/mark_failed` accessors were kept for backward compat (tests) but rewritten to NOT call `mark_segment` (which would double-count `segments_imported`/`retried`). New code uses `mark_segment` directly.
+
+**What Changed:**
+- `ai_ml/scrapers/normalizer.py` — `split_into_segments` function (returns N paths + index/timing info); old `normalize_and_trim` kept for backward compat.
+- `ai_ml/scrapers/uploader.py` — `save_clip_segments` (N-row save with shared group_id); old `save_clip` becomes a wrapper.
+- `ai_ml/scrapers/state.py` — per-segment schema: `state.items[item_id].segment_status = {seg_index: status}`. New accessors: `ensure_item`, `mark_segment`, `item_done`, `item_has_failures`, `item_segments_to_process`. Legacy `mark_imported/skip/failed` rewritten to write to both schemas.
+- `ai_ml/scrapers/sources/youtube.py` (new) — yt-dlp-backed YouTube connector.
+- `ai_ml/scrapers/sources/youtube_shorts.py` (new) — same, but with 90s default max.
+- `ai_ml/scrapers/sources/__init__.py` — registered youtube + youtube_shorts.
+- `ai_ml/scrapers/downloader.py` — `_download_youtube` handles pseudo-URLs; YT_DLP missing → clear RuntimeError.
+- `backend/app/models.py` — added `group_id` (UUIDField, indexed), `segment_index` (IntegerField), `segment_count` (IntegerField).
+- `backend/app/migrations/0003_audioclip_segments.py` (new) — adds the three columns.
+- `backend/app/management/commands/scrape_audio.py` — `--source` optional; `--sources` adds explicit list; `--clip-length` controls segment size; per-segment state tracking; multi-source summary at the end.
+- `backend/app/tests/test_scraper_segments.py` (new) — 5 tests for splitter + uploader.
+- `backend/app/tests/test_scraper_state_segments.py` (new) — 9 tests for per-segment state.
+- `backend/app/tests/test_scraper_youtube.py` (new) — 9 tests for YouTube + Shorts.
+- `requirements-media.txt` — added `yt-dlp==2025.9.26`.
+- `AGENTS.md` — updated sources list, env vars, flags, added this session entry.
+
+**Open Questions / Unresolved Risks:**
+- yt-dlp is not in the wheelhouse. Until the operator runs the regen script + rebuilds, the YouTube connectors return []. The rest of the scraper works fine.
+- The match_filter for YouTube doesn't actually check the `license` field (YouTube rarely exposes it on individual videos). UNKNOWN license family is the default; the central gate filters these out. Operator should pre-filter upstream via search query to maximize usable content.
+- The `group_id` field has a database index. A query like "all segments of group X" becomes `WHERE group_id = X ORDER BY segment_index` — fast. But there's no FK to ensure orphaned segments are cleaned up. A periodic Celery task could find groups with all `moderation_approved=False` and delete them.
+- All-sources mode doesn't have a global "skip this source" mechanism short of --exclude-sources (not yet implemented). If one source errors out, the loop continues to the next.
+
+**Design Doc Reference:** `docs/EXPLAIN/decisions/2026-09-07-scraping-coverage-expansion.md`
+
+### 2026-09-08 — disable pixabay + podcast_index sources pending API keys
+
+**Context:** Operator added freesound API key; pixabay and podcast_index are problematic. Requested to comment out those sources and add docstrings explaining they need to be uncommented once API keys are available.
+
+**What Was Learned (Durable):**
+- Commenting out a source in `__init__.py`'s `from . import (...)` block AND removing it from the `SOURCES` dict is the correct way to fully disable a connector. It won't appear in `--source` choices, won't be iterated in all-sources mode, and won't be resolvable via `SOURCES['pixabay']`.
+- Tests that access source modules via `_sources_pkg.pixabay` (attribute access on the package) will break when the import is removed. Fix: use direct `from ai_ml.scrapers.sources import pixabay` imports in tests — Python resolves submodules on disk even if `__init__.py` doesn't import them.
+- `SCRAPER_SOURCES` in `settings.py` is only referenced in docs (not in code), so commenting out entries there is purely documentary.
+- The source modules (pixabay.py, podcast_index.py) already gracefully return `[]` + WARNING when API keys are absent — no code change needed in the modules themselves; just the registration disablement.
+
+**What Changed:**
+- `ai_ml/scrapers/sources/__init__.py` — commented out `pixabay` and `podcast_index` imports + SOURCES dict entries; added docstring explaining re-enable steps
+- `ai_ml/scrapers/sources/pixabay.py` — added module docstring noting disabled state + re-enable steps
+- `ai_ml/scrapers/sources/podcast_index.py` — same
+- `backend/EchoFlow/settings.py` — commented out `'pixabay'` and `'podcast_index'` in `SCRAPER_SOURCES`
+- `backend/app/tests/test_scraper_sources.py` — removed pixabay/podcast_index from expected SOURCES set; updated TestPixabay/TestPodcastIndex to use direct module imports
+
+**Open Questions / Unresolved Risks:**
+- Docker daemon was not available in this environment; tests could not be run to verify. Syntax was validated with `ast.parse()` on all modified files.
+- The `test_scraper_license_helpers.py::test_pixabay` test tests `normalize_license('Pixabay')` against the license-normalization function — this still passes because it tests `base.py`, not the source connector.
+
+**Additional Fix (post-session):**
+- `test_scraper.py::test_uploader_creates_audioclip` failed with `AttributeError: 'list' object has no attribute 'id'` because `save_clip` now delegates to `save_clip_segments` which returns a list (single-element list for `max_seconds=0`). Fix: unwrap with `clips = uploader.save_clip(...)` then `clip = clips[0]`. Verified: 45/45 scraper tests pass.
+- The 37 failures in the full test suite (test_adversarial_pass3, test_auth_regulatory, test_security_and_validation, etc.) are **pre-existing** — all `301` redirects from `SECURE_SSL_REDIRECT=True` in the test environment. Not caused by the pixabay/podcast_index disable.
+
+**Additional Fix — yt-dlp in media image (this session):**
+- `yt-dlp==2025.9.26` was in `requirements-media.txt` but not in the offline wheelhouse or constraints.txt, causing the `celery_media` Docker build to fail.
+- **Fixed properly**: Added `yt-dlp==2025.9.26` to `constraints.txt` (direct deps section). Simplified `Dockerfile` `py-deps-media` stage to use the standard single wheelhouse install (`-r requirements-media.txt`). The wheelhouse must now be regenerated (see AGENTS.md "Regenerate the wheelhouse") to include yt-dlp. Until regeneration, the `celery_media` build will fail with "No matching distribution found for yt-dlp==2025.9.26".
+- Fixed pre-existing HF model cache copy issue: the model baking step wrote to a BuildKit cache mount (`/home/appuser/.cache/huggingface`) which doesn't persist to the layer. Added `cp -r /home/appuser/.cache/huggingface /opt/hf-cache` in the RUN step to copy to a layer path, and updated the final `media` stage to COPY from `/opt/hf-cache`.

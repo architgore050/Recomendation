@@ -131,6 +131,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Single resolver pass, fully offline: wheelhouse includes the CPU-only torch
 # build (torch-2.8.0+cpu-cp311); constraints.txt pins torch so nothing can
 # resolve to a CUDA build.
+#
+# NOTE: yt-dlp==2025.9.26 is now pinned in requirements-media.txt and
+# constraints.txt. The wheelhouse must be regenerated (see AGENTS.md
+# "Regenerate the wheelhouse") to include it. Until then, this build will
+# fail with "No matching distribution found for yt-dlp==2025.9.26".
 RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
     pip install --no-cache-dir \
       --default-timeout=1000 --retries 10 \
@@ -154,6 +159,9 @@ RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
 #   --mount=type=secret  -> file exists only during THIS RUN, never persisted
 #   `set -eu` (NOT -x!)  -> xtrace would echo the exported token into build logs
 #   [ -s ... ] guard     -> absent/empty secret = anonymous public download
+#
+# The HF cache mount is ephemeral for this RUN; copy to a layer path so
+# the final media stage can COPY it. The layer path mirrors the cache path.
 RUN --mount=type=secret,id=hf_token \
     --mount=type=cache,id=echoflow-hf,target=/home/appuser/.cache/huggingface,sharing=locked,uid=1000,gid=1000 \
     set -eu; \
@@ -162,7 +170,9 @@ RUN --mount=type=secret,id=hf_token \
     fi; \
     python -c "from faster_whisper import WhisperModel; m = WhisperModel('base', device='cpu', compute_type='int8'); del m"; \
     python -c "from sentence_transformers import SentenceTransformer; m = SentenceTransformer('all-MiniLM-L6-v2'); del m"; \
-    python -c "from keybert import KeyBERT; m = KeyBERT(); del m"
+    python -c "from keybert import KeyBERT; m = KeyBERT(); del m"; \
+    # Copy HF cache to layer so final media stage can COPY it
+    cp -r /home/appuser/.cache/huggingface /opt/hf-cache
 
 # -----------------------------------------------------------------------------
 # Final images
@@ -221,7 +231,7 @@ LABEL org.opencontainers.image.title="echoflow-media" \
 
 # Baked-in models from the builder stage, re-owned for the runtime user.
 COPY --from=py-deps-media --chown=appuser:appgroup \
-     /home/appuser/.cache/huggingface /home/appuser/.cache/huggingface
+     /opt/hf-cache /home/appuser/.cache/huggingface
 
 # Same explicit allowlist as the api stage.
 COPY --chown=appuser:appgroup backend/ ./backend/

@@ -52,6 +52,7 @@ sentence-transformers==6.0.0
 SpeechRecognition==3.17.0
 keybert==0.9.0
 soundfile==0.14.0
+yt-dlp==2025.9.26
 
 # ---- torch: MUST come from the CPU index (see Dockerfile media stage) -------
 # "2.8.0" matches the "+cpu" local-version build served by download.pytorch.org;
