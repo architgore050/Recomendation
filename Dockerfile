@@ -131,17 +131,20 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Single resolver pass, fully offline: wheelhouse includes the CPU-only torch
 # build (torch-2.8.0+cpu-cp311); constraints.txt pins torch so nothing can
 # resolve to a CUDA build.
-#
-# NOTE: yt-dlp==2025.9.26 is now pinned in requirements-media.txt and
-# constraints.txt. The wheelhouse must be regenerated (see AGENTS.md
-# "Regenerate the wheelhouse") to include it. Until then, this build will
-# fail with "No matching distribution found for yt-dlp==2025.9.26".
 RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
     pip install --no-cache-dir \
       --default-timeout=1000 --retries 10 \
       --no-index --find-links=/wheelhouse \
       -c constraints.txt \
       -r requirements-media.txt
+
+# Install online-only dependencies from PyPI (not in wheelhouse).
+# Add new packages here without regenerating the wheelhouse.
+RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
+    pip install --no-cache-dir \
+      --default-timeout=300 --retries 5 \
+      -c constraints.txt \
+      -r requirements-online.txt
 
 # Bake HuggingFace models so runtime never needs network access. A failed
 # download FAILS THE BUILD deliberately — a half-baked media image is worse

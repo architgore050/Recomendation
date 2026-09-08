@@ -165,7 +165,7 @@ Single multi-stage `Dockerfile` with five stages (two are build-only):
 |---|---|---|
 | `base` | parent of all | apt union (libpq-dev, gcc, postgresql-client, ffmpeg, libsndfile1), appuser (UID 1000) |
 | `py-deps-api` | no | installs requirements-base.txt offline from wheelhouse into site-packages |
-| `py-deps-media` | no | requirements-media.txt + bakes HuggingFace models into the `echoflow-hf` cache mount, then `cp -a` to `/home/appuser/hf_baked` so the models persist into the layer (see "HuggingFace bake copy-to-layer" below) |
+| `py-deps-media` | no | requirements-media.txt + bakes HuggingFace models into the `echoflow-hf` cache mount, then `cp -a` to `/home/appuser/hf_baked` so the models persist into the layer (see "HuggingFace bake copy-to-layer" below). Also installs `requirements-online.txt` from PyPI for packages not in wheelhouse (e.g. yt-dlp). |
 | `api` | yes | web, celery, celery_feed, celery_beat — small image, no wheels/models |
 | `media` | yes | celery_media — `COPY --from=py-deps-media /home/appuser/hf_baked /home/appuser/.cache/huggingface`; runtime `HF_HOME=/home/appuser/.cache/huggingface` |
 
@@ -222,6 +222,16 @@ docker compose build --build-arg TAG=dev
 
 ### Offline wheelhouse
 All pip installs use `--no-index --find-links=/wheelhouse`. The wheelhouse is a local directory of pre-built wheels that makes builds fully offline and deterministic.
+
+**Two-tier dependency system:**
+- `requirements-base.txt` + `requirements-media.txt` — packages in the offline wheelhouse
+- `requirements-online.txt` — packages NOT in the wheelhouse (installed from PyPI after wheelhouse install)
+- `constraints.txt` — shared version pins for ALL requirements files
+
+When adding new dependencies:
+1. If the package is already in the wheelhouse, add it to `requirements-base.txt` or `requirements-media.txt`
+2. If the package is NOT in the wheelhouse, add it to `requirements-online.txt` and `constraints.txt`
+3. The Dockerfile's `py-deps-media` stage installs both: wheelhouse first (offline), then online (PyPI)
 
 **Regenerate the wheelhouse** (run inside a py3.11 container):
 ```bash
@@ -1829,3 +1839,26 @@ The objective is not to make the most changes or finish fastest. The objective i
 - The wheelhouse regen script in this file does NOT include `sentry-sdk[django,celery]==2.18.0` — actually it does (the regen doc was updated for it; this risk is closed).
 
 **Design Doc Reference:** None (these were bug fixes; no design doc was produced). The test-fix decision tree and Dockerfile `cp -a` rationale are captured inline in the file `DECISION:` comments.
+
+### 2026-09-08 — requirements-online.txt for packages not in wheelhouse
+
+**Context:** yt-dlp was in requirements-media.txt but not in the offline wheelhouse, causing the `celery_media` Docker build to fail with `--no-index`. Instead of regenerating the wheelhouse (which requires a manual script run), created a new `requirements-online.txt` for packages not in the wheelhouse.
+
+**What Was Learned (Durable):**
+- **Pattern:** `requirements-*.txt` = offline wheelhouse packages. `requirements-online.txt` = PyPI-only packages. Dockerfile installs both: wheelhouse first (offline), then online (PyPI).
+- **Benefit:** Adding new dependencies doesn't require regenerating the wheelhouse. Just add to `requirements-online.txt` and constraints.txt (if needed).
+- **Tradeoff:** The build now requires network access for the online install step. The wheelhouse install remains fully offline.
+- **constraints.txt** is still used for both installs — it acts as the single source of truth for version ceilings. Packages in `requirements-online.txt` should still be pinned in constraints.txt.
+
+**What Changed:**
+- `requirements-online.txt` (new) — online-only dependencies (currently: yt-dlp==2025.9.26)
+- `requirements-media.txt` — removed yt-dlp (moved to requirements-online.txt)
+- `constraints.txt` — removed yt-dlp (moved to requirements-online.txt)
+- `Dockerfile:141-147` — added second RUN step to install `requirements-online.txt` from PyPI
+- `AGENTS.md` — documented the pattern
+
+**Open Questions / Unresolved Risks:**
+- If `requirements-online.txt` grows large, consider regenerating the wheelhouse to keep builds offline.
+- The online install step adds ~5-10 seconds to the build time (downloading from PyPI).
+
+**Design Doc Reference:** None (operational pattern change).
