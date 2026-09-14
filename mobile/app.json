@@ -34,9 +34,6 @@
         "android.permission.FOREGROUND_SERVICE"
       ]
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    },
     "scheme": "echoflow",
     "plugins": [
       [
@@ -44,7 +41,8 @@
         {
           "microphonePermission": "Allow EchoFlow to access your microphone for recording audio reels."
         }
-      ]
+      ],
+      "expo-asset"
     ]
   }
 }

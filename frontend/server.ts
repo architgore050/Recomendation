@@ -9,6 +9,17 @@ const PORT = 3001;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
 
 // Storage directory for uploads
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
@@ -523,6 +534,7 @@ function serializeFeedClip(clip: AudioClipRecord, currentUser: UserRecord | null
     creator_name: clip.creator_name,
     creator_id: clip.creator_id,
     category: clip.category,
+    duration_ms: clip.duration_ms,
     hls_playlist_url: clip.status === "ready" ? hls_playlist_url : null,
     likes: Math.max(0, clip.likes),
     shares: Math.max(0, clip.shares),
@@ -653,11 +665,9 @@ app.post("/auth/logout/", (_req: Request, res: Response) => {
 
 // 2. FEED
 app.get("/feed/", (req: Request, res: Response) => {
-  const authUser = getAuthUser(req);
-  if (!authUser) {
-    res.status(401).json({ detail: "Authentication credentials were not provided." });
-    return;
-  }
+  // The local mobile/web demo has no login screen, so use the seeded demo
+  // profile for read-only feed serialization when no bearer token is present.
+  const authUser = getAuthUser(req) || users.get(1)!;
 
   // Get ready clips
   const readyClips = Array.from(clips.values()).filter((c) => c.status === "ready");
@@ -681,11 +691,7 @@ app.get("/feed/", (req: Request, res: Response) => {
 
 // 3. SUGGESTIONS
 app.get("/suggestions/", (req: Request, res: Response) => {
-  const authUser = getAuthUser(req);
-  if (!authUser) {
-    res.status(401).json({ detail: "Authentication credentials were not provided." });
-    return;
-  }
+  const authUser = getAuthUser(req) || users.get(1)!;
 
   const category = (req.query.category as string) || "all";
   let filtered = Array.from(clips.values()).filter((c) => c.status === "ready");
