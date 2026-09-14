@@ -25,7 +25,10 @@ if not SECRET_KEY:
 DEBUG = os.environ.get('DJANGO_DEBUG', 'False').lower() == 'true'
 
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost').split(',')
-CORS_ALLOWED_ORIGINS = os.environ.get('DJANGO_CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:5173,http://localhost:3021').split(',')
+CORS_ALLOWED_ORIGINS = os.environ.get(
+    'DJANGO_CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:3021,http://localhost:8081',
+).split(',')
 # DECISION: CORS_ALLOW_ALL_ORIGINS is hard-coded to False; the env-driven
 # allowlist above is the single source of truth. Previously this line was
 # read from DJANGO_CORS_ALL env var but then unconditionally reassigned

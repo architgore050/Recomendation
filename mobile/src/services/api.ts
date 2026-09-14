@@ -15,7 +15,7 @@ import {
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL ||
   (Platform.OS === 'web'
-    ? 'http://localhost:3001'
+    ? 'http://localhost:8005'
     : Platform.OS === 'android'
       ? 'http://10.0.2.2:8005'
       : 'http://localhost:8005');
@@ -226,7 +226,7 @@ export const shareAPI = {
 
 // Upload API
 export const uploadAPI = {
-  uploadAudio: async (formData: FormData): Promise<{ id: string; status: string }> => {
+  uploadAudio: async (formData: FormData): Promise<{ clip_id: string; status: string }> => {
     return apiFetch('/clips/', {
       method: 'POST',
       body: formData,

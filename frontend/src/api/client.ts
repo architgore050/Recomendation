@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 import {
   AuthTokens,
   Comment,
@@ -13,6 +15,23 @@ import {
 const STORAGE_KEY_ACCESS = "ef_access_token";
 const STORAGE_KEY_REFRESH = "ef_refresh_token";
 const STORAGE_KEY_USER = "ef_user";
+
+function getDefaultApiBaseUrl(): string {
+  if (typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    // The local Vite/Express server provides the demo API when Django is not running.
+    // Set VITE_API_BASE_URL=http://localhost:8005 to use the real backend locally.
+    return window.location.port === "3001" ? window.location.origin : "http://localhost:3001";
+  }
+  return "http://localhost:8005";
+}
+
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL || getDefaultApiBaseUrl()
+).replace(/\/+$/, "");
+
+function apiUrl(endpoint: string): string {
+  return endpoint.startsWith("http") ? endpoint : `${API_BASE_URL}${endpoint}`;
+}
 
 export function getStoredTokens(): AuthTokens | null {
   const access = sessionStorage.getItem(STORAGE_KEY_ACCESS);
@@ -66,7 +85,7 @@ async function refreshAccessToken(): Promise<string | null> {
 
   refreshPromise = (async () => {
     try {
-      const res = await fetch("/auth/token/refresh/", {
+      const res = await fetch(apiUrl("/auth/token/refresh/"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refresh: tokens.refresh }),
@@ -120,7 +139,7 @@ export async function apiRequest<T = any>(
     headers.set("Authorization", `Bearer ${tokens.access}`);
   }
 
-  let response = await fetch(endpoint, {
+  let response = await fetch(apiUrl(endpoint), {
     ...rest,
     headers,
   });
@@ -130,7 +149,7 @@ export async function apiRequest<T = any>(
     const newAccess = await refreshAccessToken();
     if (newAccess) {
       headers.set("Authorization", `Bearer ${newAccess}`);
-      response = await fetch(endpoint, {
+      response = await fetch(apiUrl(endpoint), {
         ...rest,
         headers,
       });

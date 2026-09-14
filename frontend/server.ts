@@ -1,6 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
 import path from "path";
-import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import multer from "multer";
 
@@ -21,25 +20,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Storage directory for uploads
-const UPLOADS_DIR = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname) || ".mp3";
-    cb(null, `audio-${uniqueSuffix}${ext}`);
-  },
-});
-
 const upload = multer({
-  storage,
+  // The demo server must never become a second durable media store.
+  storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB max
 });
 
@@ -564,9 +547,6 @@ app.get("/api/media/audio/:clip_id.wav", (req: Request, res: Response) => {
   res.send(wavBuffer);
 });
 
-// Static uploaded file serving
-app.use("/uploads", express.static(UPLOADS_DIR));
-
 // 1. AUTH
 app.post("/auth/register/", (req: Request, res: Response) => {
   const { username, password, email } = req.body;
@@ -770,7 +750,7 @@ app.post("/clips/", upload.single("original_file"), (req: Request, res: Response
   // Determine media URL
   const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
   const host = req.get("host") || `localhost:${PORT}`;
-  const hlsUrl = `${protocol}://${host}/uploads/${file.filename}`;
+  const hlsUrl = `${protocol}://${host}/api/media/audio/${clipId}.wav`;
 
   const newClip: AudioClipRecord = {
     id: clipId,
@@ -788,7 +768,6 @@ app.post("/clips/", upload.single("original_file"), (req: Request, res: Response
     engagement_velocity: 5.0,
     avg_completion_rate: 0.0,
     audio_type: "music",
-    filePath: file.path,
     created_at: new Date().toISOString(),
   };
 
